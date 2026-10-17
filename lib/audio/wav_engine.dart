@@ -131,7 +131,7 @@ class WavTranscriber {
           midi: active!,
           startSeconds: onset,
           endSeconds: end,
-          confidence: (confidenceSum / frames).clamp(0.0, 1.0),
+          confidence: (confidenceSum / frames).clamp(0.0, 1.0).toDouble(),
         ));
       }
     }
@@ -187,7 +187,7 @@ class WavTranscriber {
           }
           final hz = rate / refined;
           final m = (69 + 12 * math.log(hz / 440) / math.ln2).round();
-          confidence = (1 - cmnd[candidate]).clamp(0.0, 1.0);
+          confidence = (1 - cmnd[candidate]).clamp(0.0, 1.0).toDouble();
           if (m >= 40 && m <= 84 && confidence > 0.75) {
             midi = m;
           }
