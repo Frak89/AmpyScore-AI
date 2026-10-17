@@ -11,16 +11,18 @@ class TrackMix {
 
 class MultiTrackMidi {
   static const int sampleRate = 16000;
-  static const int ticksPerSecond = 960; // PPQ 480 @ 120 BPM
+  static const int ticksPerQuarter = 480;
 
   /// Type-1 SMF with tempo track and one actual MIDI track per family.
   static Uint8List export(List<InstrumentPart> parts, {int bpm = 120}) {
     final output = BytesBuilder(copy: false);
+    final checkedBpm = bpm.clamp(40, 240);
+    final ticksPerSecond = ticksPerQuarter * checkedBpm / 60.0;
     output.add([0x4D, 0x54, 0x68, 0x64]); // MThd
     output.add(_u32(6));
     output.add([0, 1, 0, (parts.length + 1) & 255, 1, 0xE0]);
 
-    final tempo = (60000000 / bpm.clamp(40, 240)).round();
+    final tempo = (60000000 / checkedBpm).round();
     final meta = <int>[
       0, 0xFF, 0x51, 3,
       (tempo >> 16) & 255, (tempo >> 8) & 255, tempo & 255,
