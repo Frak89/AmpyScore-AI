@@ -1,0 +1,38 @@
+name: Android debug APK
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Generate Flutter native platforms
+        run: flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
+      - name: Add platform microphone permissions
+        run: python3 tool/configure_platforms.py
+      - name: Fetch dependencies
+        run: flutter pub get
+      - name: Flutter static analysis
+        run: flutter analyze --no-fatal-infos
+      - name: Test WAV demo/transcription
+        run: flutter test
+      - name: Build installable debug APK
+        run: flutter build apk --debug
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ampyscore-debug-apk
+          path: build/app/outputs/flutter-apk/app-debug.apk
+          retention-days: 14
