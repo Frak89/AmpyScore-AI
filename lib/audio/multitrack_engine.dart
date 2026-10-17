@@ -168,7 +168,7 @@ class MultiTrackAnalyzer {
       if (active != null && count >= 2 && end - onset >= 0.14 &&
           notes.length < 110) {
         notes.add(DetectedNote(
-          midi: active!,
+          midi: active,
           startSeconds: math.max(0, onset - 0.04),
           endSeconds: math.min(totalDuration, end),
           confidence: (sums / count).clamp(0.0, 1.0).toDouble(),
