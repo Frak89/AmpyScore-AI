@@ -1,7 +1,7 @@
 name: ampy_score_ai
 description: "AmpyScore AI: offline monophonic audio to notation proof of concept."
 publish_to: none
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: ">=3.10.0 <4.0.0"

@@ -11,6 +11,10 @@ import 'package:record/record.dart';
 import 'audio/staff_painter.dart';
 import 'audio/wav_engine.dart';
 import 'audio/midi_engine.dart';
+import 'audio/multitrack_engine.dart';
+import 'audio/multitrack_midi.dart';
+import 'audio/rhythm_engine.dart';
+import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 
 void main() => runApp(const AmpyScoreApp());
@@ -64,6 +68,16 @@ class _StudioPageState extends State<StudioPage> {
   Timer? _transportTimer;
 
   List<DetectedNote> _notes = const [];
+  bool _multitrackMode = true;
+  List<InstrumentPart> _parts = const [];
+  InstrumentFamily? _selectedFamily;
+  InstrumentFamily? _soloFamily;
+  Map<InstrumentFamily, double>? _savedBeforeSolo;
+  RhythmReport? _rhythm;
+  String? _lastMixPath;
+  final Map<InstrumentFamily, double> _partGains = {
+    for (final family in InstrumentFamily.values) family: 0.90,
+  };
   String? _trackPath;
   String _trackName = 'Nessuna traccia';
   String _status = 'Pronto per una registrazione o un file WAV.';
@@ -130,6 +144,11 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _trackName = name;
       _notes = const [];
+      _parts = const [];
+      _rhythm = null;
+      _selectedFamily = null;
+      _soloFamily = null;
+      _savedBeforeSolo = null;
       _assistantAnswer = null;
       _cursor = Duration.zero;
       _activeIndex = -1;
@@ -143,6 +162,19 @@ class _StudioPageState extends State<StudioPage> {
         final file = File('${dir.path}/ampyscore_demo.wav');
         await file.writeAsBytes(DemoWav.create(), flush: true);
         await _load(file.path, 'Demo: Do Re Mi Sol');
+      });
+
+  Future<void> _multiDemo() => _execute(() async {
+        final dir = await getApplicationDocumentsDirectory();
+        final file = File('${dir.path}/ampyscore_multitrack_demo.wav');
+        await file.writeAsBytes(MultiInstrumentDemo.create(), flush: true);
+        await _load(file.path, 'Demo multistrumento: basso, armonia, melodia, beat');
+        if (mounted) {
+          setState(() {
+            _multitrackMode = true;
+            _status = 'Demo multistrumento caricata. Premi Analizza WAV.';
+          });
+        }
       });
 
   Future<void> _import() => _execute(() async {
@@ -211,29 +243,93 @@ class _StudioPageState extends State<StudioPage> {
       throw const FormatException('WAV troppo grande (limite 32 MB).');
     }
     if (mounted) setState(() => _status = 'Trascrizione in corso sul dispositivo...');
-    final detected = await compute(WavTranscriber.transcribe, bytes);
     await _midiPlayer.stop();
-    if (detected.isNotEmpty) {
-      final rendered = await compute(MidiEngine.renderWav, detected);
-      final dir = await getApplicationDocumentsDirectory();
-      final midiPreview = File('${dir.path}/ampyscore_midi_preview.wav');
-      await midiPreview.writeAsBytes(rendered, flush: true);
-      await _midiPlayer.setFilePath(midiPreview.path);
-      await _midiPlayer.setVolume(_midiVolume);
+    if (_multitrackMode) {
+      final result = await compute(MultiTrackAnalyzer.analyze, bytes);
+      final rhythm = RhythmAnalyzer.estimate(result.parts);
+      final wanted = result.parts.where(
+        (p) => p.family == InstrumentFamily.melody,
+      );
+      final selected = wanted.isNotEmpty
+          ? wanted.first
+          : (result.parts.isNotEmpty ? result.parts.first : null);
+      if (result.hasNotes) {
+        await _renderMultiPreview(result.parts, result.durationSeconds);
+      }
+      await _player.seek(Duration.zero);
+      if (mounted) {
+        setState(() {
+          _parts = result.parts;
+          _selectedFamily = selected?.family;
+          _rhythm = rhythm;
+          _notes = selected?.notes ?? const [];
+          _assistantAnswer = null;
+          _midiReady = result.hasNotes;
+          _cursor = Duration.zero;
+          _activeIndex = -1;
+          _soloFamily = null;
+          _savedBeforeSolo = null;
+          _status = !result.hasNotes
+              ? 'Nessun registro rilevato. Prova la demo multistrumento.'
+              : '${result.parts.length} registri sonori stimati, '
+                'tempo ≈ ${rhythm.bpm} BPM. '
+                'Il metodo non identifica strumenti reali con certezza.';
+        });
+      }
+    } else {
+      final detected = await compute(WavTranscriber.transcribe, bytes);
+      if (detected.isNotEmpty) {
+        final rendered = await compute(MidiEngine.renderWav, detected);
+        final dir = await getApplicationDocumentsDirectory();
+        final preview = File('${dir.path}/ampyscore_midi_preview.wav');
+        await preview.writeAsBytes(rendered, flush: true);
+        await _midiPlayer.setFilePath(preview.path);
+        await _midiPlayer.setVolume(_midiVolume);
+      }
+      await _player.seek(Duration.zero);
+      final rhythm = RhythmAnalyzer.estimate([
+        InstrumentPart(family: InstrumentFamily.melody,
+            notes: detected, confidence: 0.6),
+      ]);
+      if (mounted) {
+        setState(() {
+          _notes = detected;
+          _parts = const [];
+          _rhythm = rhythm;
+          _selectedFamily = null;
+          _assistantAnswer = null;
+          _midiReady = detected.isNotEmpty;
+          _cursor = Duration.zero;
+          _activeIndex = -1;
+          _status = detected.isEmpty
+              ? 'Non ho trovato note abbastanza chiare.'
+              : '${detected.length} note. Tempo ≈ ${rhythm.bpm} BPM.';
+        });
+      }
     }
-    await _player.seek(Duration.zero);
-    if (mounted) {
-      setState(() {
-        _notes = detected;
-        _assistantAnswer = null;
-        _midiReady = detected.isNotEmpty;
-        _cursor = Duration.zero;
-        _activeIndex = -1;
-        _status = detected.isEmpty
-            ? 'Non ho trovato note abbastanza chiare: prova una melodia singola.'
-            : 'Rilevate ${detected.length} note (analisi locale, primi 40 s). '
-              'Puoi ascoltare il MIDI e confrontarlo con il brano.';
-      });
+  }
+
+  Future<void> _renderMultiPreview(
+    List<InstrumentPart> parts, double duration,
+  ) async {
+    final data = await compute(
+      MultiTrackMidi.renderMix,
+      TrackMix(parts, Map.of(_partGains), durationSeconds: duration),
+    );
+    final dir = await getApplicationDocumentsDirectory();
+    final newFile = File('${dir.path}/ampyscore_mix_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    await newFile.writeAsBytes(data, flush: true);
+    final old = _lastMixPath;
+    await _midiPlayer.setFilePath(newFile.path);
+    await _midiPlayer.setVolume(_midiVolume);
+    _lastMixPath = newFile.path;
+    if (old != null) {
+      try {
+        await File(old).delete();
+      } catch (_) {
+        // OS may still hold the last playback file.
+      }
     }
   }
 
@@ -383,12 +479,72 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  void _selectFamily(InstrumentFamily family) {
+    if (_parts.isEmpty || _busy) return;
+    final match = _parts.where((part) => part.family == family);
+    if (match.isEmpty) return;
+    setState(() {
+      _selectedFamily = family;
+      _notes = match.first.notes;
+      _activeIndex = _noteAt(_cursor.inMicroseconds / 1000000.0);
+    });
+  }
+
+  Future<void> _remix() => _execute(() async {
+        if (_parts.isEmpty || !_midiReady) return;
+        final resume = _playing;
+        final previousMode = _mode;
+        final oldCursor = _cursor;
+        await _pauseTransport();
+        await _midiPlayer.stop();
+        await _renderMultiPreview(_parts, _durationSeconds);
+        await _seekTransport(oldCursor);
+        if (resume && previousMode != null && mounted) {
+          setState(() {
+            _mode = previousMode;
+            _playing = true;
+          });
+          if (previousMode != _PlaybackMode.midi) {
+            unawaited(_player.play());
+          }
+          if (previousMode != _PlaybackMode.original) {
+            unawaited(_midiPlayer.play());
+          }
+        }
+      });
+
+  Future<void> _toggleSolo(InstrumentFamily family) async {
+    if (_busy || _parts.isEmpty) return;
+    if (_soloFamily == family && _savedBeforeSolo != null) {
+      setState(() {
+        _partGains.addAll(_savedBeforeSolo!);
+        _savedBeforeSolo = null;
+        _soloFamily = null;
+      });
+    } else {
+      final previous = _savedBeforeSolo ?? Map.of(_partGains);
+      setState(() {
+        _savedBeforeSolo = previous;
+        _soloFamily = family;
+        for (final part in _parts) {
+          _partGains[part.family] =
+              part.family == family ? (previous[family] ?? .9) : 0;
+        }
+      });
+    }
+    await _remix();
+  }
+
   Future<void> _exportMidi() => _execute(() async {
         if (_notes.isEmpty) return;
-        final bytes = MidiEngine.exportMidi(_notes);
+        final bytes = _parts.isEmpty
+        ? MidiEngine.exportMidi(_notes)
+        : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
-          fileName: 'AmpyScore_trascrizione.mid',
+          fileName: _parts.isEmpty
+              ? 'AmpyScore_trascrizione.mid'
+              : 'AmpyScore_multitraccia.mid',
           type: FileType.custom,
           allowedExtensions: ['mid'],
           bytes: bytes,
@@ -425,7 +581,7 @@ class _StudioPageState extends State<StudioPage> {
           Padding(
             padding: EdgeInsets.only(right: 18),
             child: Center(
-              child: Text('v0.2', style: TextStyle(color: Color(0xFF9DAABA))),
+              child: Text('v0.3', style: TextStyle(color: Color(0xFF9DAABA))),
             ),
           ),
         ],
@@ -441,7 +597,7 @@ class _StudioPageState extends State<StudioPage> {
             ),
             const SizedBox(height: 9),
             const Text(
-              'Registrazione, prova musicale e note monofoniche offline.',
+              'MIDI multitraccia sperimentale e ritmo stimato, offline.',
               style: TextStyle(color: Color(0xFF9DAABA)),
             ),
             const SizedBox(height: 22),
@@ -466,6 +622,11 @@ class _StudioPageState extends State<StudioPage> {
                   label: const Text('Demo musicale'),
                 ),
                 OutlinedButton.icon(
+                  onPressed: _busy || _recording ? null : _multiDemo,
+                  icon: const Icon(Icons.library_music_outlined),
+                  label: const Text('Demo multistrumento'),
+                ),
+                OutlinedButton.icon(
                   onPressed: _busy || _recording ? null : _import,
                   icon: const Icon(Icons.folder_open),
                   label: const Text('Importa WAV'),
@@ -483,6 +644,26 @@ class _StudioPageState extends State<StudioPage> {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontWeight: FontWeight.w600)),
                   const SizedBox(height: 11),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _multitrackMode,
+                    onChanged: _busy || _recording ? null : (value) {
+                      unawaited(_pauseTransport());
+                      setState(() {
+                        _multitrackMode = value;
+                        _notes = const [];
+                        _parts = const [];
+                        _rhythm = null;
+                        _midiReady = false;
+                        _selectedFamily = null;
+                        _activeIndex = -1;
+                        _status = 'Modalità cambiata. Premi Analizza WAV.';
+                      });
+                    },
+                    title: const Text('Analisi multitraccia'),
+                    subtitle: const Text('Sperimentale: per registro, non per timbro',
+                      style: TextStyle(fontSize: 12)),
+                  ),
                   Wrap(spacing: 10, runSpacing: 10, children: [
                     FilledButton.tonalIcon(
                       onPressed: canPlay
@@ -506,6 +687,28 @@ class _StudioPageState extends State<StudioPage> {
                     const LinearProgressIndicator(minHeight: 3),
                   ],
                 ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            _section(
+              icon: Icons.graphic_eq_outlined,
+              title: 'Registri e ritmo',
+              child: MultiTrackPanel(
+                parts: _parts,
+                rhythm: _rhythm,
+                selected: _selectedFamily,
+                gains: _partGains,
+                solo: _soloFamily,
+                enabled: !_busy && !_recording,
+                onSelect: _selectFamily,
+                onSolo: (family) => unawaited(_toggleSolo(family)),
+                onGain: (family, value) => setState(() {
+                  _partGains[family] = value;
+                  if (_savedBeforeSolo != null) {
+                    _savedBeforeSolo![family] = value;
+                  }
+                }),
+                onGainDone: () => unawaited(_remix()),
               ),
             ),
             const SizedBox(height: 20),
@@ -641,8 +844,14 @@ class _StudioPageState extends State<StudioPage> {
                   ),
                   if (_notes.isNotEmpty) ...[
                     const SizedBox(height: 14),
-                    const Text('Tocca una nota per ascoltarla da sola:',
-                        style: TextStyle(color: Color(0xFFAFBDCA))),
+                    Text(
+                      _selectedFamily == null
+                          ? 'Tocca una nota per ascoltarla da sola:'
+                          : 'Pentagramma: ${_parts.firstWhere(
+                                (part) => part.family == _selectedFamily,
+                              ).name}. Tocca una nota:',
+                      style: const TextStyle(color: Color(0xFFAFBDCA)),
+                    ),
                     const SizedBox(height: 8),
                     SizedBox(
                       height: 54,
@@ -658,7 +867,8 @@ class _StudioPageState extends State<StudioPage> {
                                   ? Icons.volume_up : Icons.play_arrow,
                               size: 19,
                             ),
-                            label: Text('${index + 1} · ${note.label}'),
+                            label: Text('${index + 1} · ${note.label}'
+                                '${_rhythm == null ? "" : " · ${_rhythm!.valueFor(note, next: index + 1 < _notes.length ? _notes[index + 1] : null).label}"}'),
                             onPressed: _busy || _recording
                                 ? null : () => unawaited(_playOneNote(index)),
                           );
