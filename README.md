@@ -1,4 +1,4 @@
-# AmpyScore AI
+# AmpyScore AI — v0.2: confronto MIDI e audio
 
 App open source per Android e iOS: ascolta dal microfono, importa file WAV e prova a trascrivere una **melodia monofonica** in note musicali. Include un esempio musicale WAV generato localmente.
 
@@ -45,3 +45,17 @@ Il riconoscimento è limitato alla melodia monofonica (circa E2–C6), all'audio
 v0.2: modello IA on-device per trascrizione; v0.3: separazione sorgenti/strumenti e MusicXML; v1.0: ottimizzazione Android/iOS. Gli esiti dei modelli, le licenze e il consumo di memoria andranno verificati prima di includerli.
 
 Licenza: MIT. Nessun server, account o analytics necessario per le funzioni locali.
+
+## Novità v0.2: MIDI e confronto sincronizzato
+
+- **Analizza WAV**, quindi scegli **Solo brano**, **Solo MIDI** oppure **Ascolta insieme**.
+- Due slider indipendenti per il volume del brano originale e della traccia MIDI sintetizzata.
+- Il pentagramma evidenzia automaticamente la nota corrente durante l'ascolto; scorre per seguirla.
+- Tocca una nota sul pentagramma oppure un pulsante numerato per ascoltare la singola nota MIDI.
+- Il cursore permette di spostarsi a qualsiasi posizione; i due player vengono riallineati.
+- **Esporta .mid** salva un vero file Standard MIDI (SMF format 0) usando il dialogo di sistema.
+- La traccia MIDI è sintetizzata offline da un generatore PCM locale, senza soundfont/server.
+
+**Limiti tecnici:** La trascrizione rimane monofonica e viene eseguita **prima** della riproduzione, non in streaming mentre il microfono ascolta. Le note sono evidenziate durante l'ascolto sincronizzando la timeline della trascrizione. I due player sono indipendenti: l'allineamento viene corretto se lo scostamento supera circa 130 ms, senza garanzia di sincronizzazione a livello di campione. La sintesi è un suono elettronico (non ricrea lo strumento originale); le durate e gli attacchi MIDI dipendono dalla precisione della trascrizione.
+
+Per testare la demo: **Demo musicale → Analizza WAV → Ascolta insieme**. Abbassa il volume del brano e alza quello MIDI, e viceversa; tocca le note Do4/Re4/Mi4/Sol4 per ascoltarle isolate.
