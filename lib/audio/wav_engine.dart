@@ -128,7 +128,7 @@ class WavTranscriber {
     void flush(double end) {
       if (active != null && frames >= 2 && end - onset >= 0.13) {
         results.add(DetectedNote(
-          midi: active!,
+          midi: active,
           startSeconds: onset,
           endSeconds: end,
           confidence: (confidenceSum / frames).clamp(0.0, 1.0).toDouble(),

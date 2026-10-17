@@ -1,0 +1,7 @@
+# Intentionally self-contained; no flutter_lints dependency required.
+analyzer:
+  exclude:
+    - "**/*.g.dart"
+linter:
+  rules:
+    avoid_print: true
