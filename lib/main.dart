@@ -10,7 +10,6 @@ import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 
-import 'audio/staff_painter.dart';
 import 'audio/wav_engine.dart';
 import 'audio/midi_engine.dart';
 import 'audio/multitrack_engine.dart';
