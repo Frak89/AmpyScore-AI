@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
@@ -14,6 +16,10 @@ import 'audio/midi_engine.dart';
 import 'audio/multitrack_engine.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
+import 'audio/stem_extractor.dart';
+import 'score/score_engine.dart';
+import 'score/score_sheet.dart';
+import 'score/note_lab.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 
@@ -64,6 +70,7 @@ class _StudioPageState extends State<StudioPage> {
   final _player = AudioPlayer(); // Original recording.
   final _midiPlayer = AudioPlayer(); // Synthesized preview WAV.
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
+  final _stemPlayer = AudioPlayer(); // Optional spectral focus WAV.
   final _apiKey = TextEditingController();
   Timer? _transportTimer;
 
@@ -74,6 +81,13 @@ class _StudioPageState extends State<StudioPage> {
   InstrumentFamily? _soloFamily;
   Map<InstrumentFamily, double>? _savedBeforeSolo;
   RhythmReport? _rhythm;
+  ScoreProject? _score;
+  int? _selectedNoteId;
+  PaperTone _paperTone = PaperTone.ivory;
+  int? _tempoOverride;
+  double _tempoSlider = 120;
+  FocusStem _focusStem = FocusStem.vocalCandidate;
+  String? _stemPath;
   String? _lastMixPath;
   final Map<InstrumentFamily, double> _partGains = {
     for (final family in InstrumentFamily.values) family: 0.90,
@@ -113,6 +127,7 @@ class _StudioPageState extends State<StudioPage> {
     _player.dispose();
     _midiPlayer.dispose();
     _notePlayer.dispose();
+    _stemPlayer.dispose();
     super.dispose();
   }
 
@@ -138,6 +153,7 @@ class _StudioPageState extends State<StudioPage> {
     await _player.stop();
     await _midiPlayer.stop();
     await _notePlayer.stop();
+    await _stemPlayer.stop();
     await _player.setFilePath(path);
     if (!mounted) return;
     setState(() {
@@ -146,6 +162,9 @@ class _StudioPageState extends State<StudioPage> {
       _notes = const [];
       _parts = const [];
       _rhythm = null;
+      _score = null;
+      _selectedNoteId = null;
+      _stemPath = null;
       _selectedFamily = null;
       _soloFamily = null;
       _savedBeforeSolo = null;
@@ -203,6 +222,7 @@ class _StudioPageState extends State<StudioPage> {
           }
           await _load(path, 'Registrazione microfono');
           await _analyseInternal();
+          _buildScoreAfterAnalysis();
           return;
         }
         if (!await _recorder.hasPermission()) {
@@ -212,6 +232,7 @@ class _StudioPageState extends State<StudioPage> {
         await _player.stop();
         await _midiPlayer.stop();
         await _notePlayer.stop();
+        await _stemPlayer.stop();
         final dir = await getApplicationDocumentsDirectory();
         final path =
             '${dir.path}/rec_${DateTime.now().millisecondsSinceEpoch}.wav';
@@ -309,6 +330,146 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  void _buildScoreAfterAnalysis() {
+    final parts = _parts.isNotEmpty ? _parts : [
+      InstrumentPart(
+        family: InstrumentFamily.melody,
+        notes: _notes,
+        confidence: 0.6,
+      ),
+    ];
+    final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
+    final project = ScoreProject.fromTranscription(parts, bpm);
+    if (mounted) {
+      setState(() {
+        _score = project;
+        _tempoSlider = project.bpm.toDouble();
+        _selectedNoteId = null;
+      });
+    }
+  }
+
+  void _onScoreEdit() {
+    final project = _score;
+    if (project == null) return;
+    final chosen = _selectedFamily ?? project.parts.first.family;
+    final lane = project.forFamily(chosen);
+    setState(() {
+      _notes = [
+        for (final item in lane)
+          DetectedNote(
+            midi: item.midi,
+            startSeconds: project.timeOf(item),
+            endSeconds: project.timeOf(item) +
+                item.length * 60 / (project.bpm * 4),
+            confidence: item.evidence,
+          ),
+      ];
+    });
+  }
+
+  List<InstrumentPart> _editedParts() {
+    final score = _score;
+    if (score == null) return _parts;
+    return [
+      for (final part in score.parts)
+        InstrumentPart(
+          family: part.family,
+          confidence: part.confidence,
+          notes: [
+            for (final item in score.forFamily(part.family))
+              DetectedNote(
+                midi: item.midi,
+                startSeconds: score.timeOf(item),
+                endSeconds: score.timeOf(item) +
+                    item.length * 60 / (score.bpm * 4),
+                confidence: item.evidence,
+              ),
+          ],
+        ),
+    ];
+  }
+
+  Future<void> _rebuildMidiFromScore() => _execute(() async {
+    final score = _score;
+    if (score == null) return;
+    final oldCursor = _cursor;
+    await _pauseTransport();
+    await _midiPlayer.stop();
+    final parts = _editedParts();
+    await _renderMultiPreview(parts, score.durationSeconds);
+    await _seekTransport(oldCursor);
+    if (mounted) {
+      setState(() {
+        _midiReady = parts.any((part) => part.notes.isNotEmpty);
+        _status = 'MIDI rigenerato da NoteLab (modifiche locali).';
+      });
+    }
+  });
+
+  Future<void> _retranscribeAtBpm() async {
+    _tempoOverride = _tempoSlider.round();
+    await _analyse();
+  }
+
+  Future<void> _exportMusicXml() => _execute(() async {
+    final score = _score;
+    if (score == null) return;
+    final xml = MusicXmlWriter.export(score);
+    final saved = await FilePicker.saveFile(
+      dialogTitle: 'Esporta lo spartito MusicXML',
+      fileName: 'AmpyScore_Studio.musicxml',
+      type: FileType.custom,
+      allowedExtensions: ['musicxml'],
+      bytes: Uint8List.fromList(utf8.encode(xml)),
+    );
+    if (mounted && saved != null) {
+      setState(() => _status = 'MusicXML esportato: $saved');
+    }
+  });
+
+  Future<void> _prepareStem() async {
+    final path = _trackPath;
+    if (path == null) throw StateError('Carica prima un WAV.');
+    await _stemPlayer.stop();
+    final source = await File(path).readAsBytes();
+    final bytes = await compute(
+      StemExtractor.focus,
+      StemRequest(source, _focusStem),
+    );
+    final dir = await getApplicationDocumentsDirectory();
+    final output = File('${dir.path}/ampyscore_filtro_${_focusStem.name}.wav');
+    await output.writeAsBytes(bytes, flush: true);
+    await _stemPlayer.setFilePath(output.path);
+    _stemPath = output.path;
+  }
+
+  Future<void> _playStem() => _execute(() async {
+    await _pauseTransport();
+    await _prepareStem();
+    unawaited(_stemPlayer.play());
+    if (mounted) {
+      setState(() => _status =
+        'Filtro frequenze: ${_focusStem.title}. '
+        'Non è una separazione vocale o strumentale tramite IA.');
+    }
+  });
+
+  Future<void> _exportStem() => _execute(() async {
+    await _prepareStem();
+    final bytes = await File(_stemPath!).readAsBytes();
+    final saved = await FilePicker.saveFile(
+      dialogTitle: 'Esporta la traccia filtrata',
+      fileName: 'AmpyScore_${_focusStem.name}.wav',
+      type: FileType.custom,
+      allowedExtensions: ['wav'],
+      bytes: bytes,
+    );
+    if (mounted && saved != null) {
+      setState(() => _status = 'Filtro WAV esportato: $saved');
+    }
+  });
+
   Future<void> _renderMultiPreview(
     List<InstrumentPart> parts, double duration,
   ) async {
@@ -333,7 +494,10 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
-  Future<void> _analyse() => _execute(_analyseInternal);
+  Future<void> _analyse() => _execute(() async {
+    await _analyseInternal();
+    _buildScoreAfterAnalysis();
+  });
 
   double get _durationSeconds {
     final duration = _player.duration;
@@ -537,9 +701,12 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _exportMidi() => _execute(() async {
         if (_notes.isEmpty) return;
-        final bytes = _parts.isEmpty
-        ? MidiEngine.exportMidi(_notes)
-        : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120);
+        final score = _score;
+    final bytes = score != null
+        ? MultiTrackMidi.export(_editedParts(), bpm: score.bpm)
+        : _parts.isEmpty
+            ? MidiEngine.exportMidi(_notes)
+            : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
           fileName: _parts.isEmpty
@@ -581,7 +748,7 @@ class _StudioPageState extends State<StudioPage> {
           Padding(
             padding: EdgeInsets.only(right: 18),
             child: Center(
-              child: Text('v0.3', style: TextStyle(color: Color(0xFF9DAABA))),
+              child: Text('v0.4', style: TextStyle(color: Color(0xFF9DAABA))),
             ),
           ),
         ],
@@ -597,7 +764,7 @@ class _StudioPageState extends State<StudioPage> {
             ),
             const SizedBox(height: 9),
             const Text(
-              'MIDI multitraccia sperimentale e ritmo stimato, offline.',
+              'Studio multitraccia · partitura 4/4 · NoteLab.',
               style: TextStyle(color: Color(0xFF9DAABA)),
             ),
             const SizedBox(height: 22),
@@ -692,7 +859,7 @@ class _StudioPageState extends State<StudioPage> {
             const SizedBox(height: 20),
             _section(
               icon: Icons.graphic_eq_outlined,
-              title: 'Registri e ritmo',
+              title: 'Registri e ritmo · identificazione preliminare',
               child: MultiTrackPanel(
                 parts: _parts,
                 rhythm: _rhythm,
@@ -824,21 +991,50 @@ class _StudioPageState extends State<StudioPage> {
             const SizedBox(height: 20),
             _section(
               icon: Icons.queue_music,
-              title: 'Anteprima pentagramma',
+              title: 'Spartito completo · 4/4',
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  StaffPreview(
-                    notes: _notes,
-                    activeIndex: _activeIndex,
-                    onNoteTap: (index) {
-                      unawaited(_playOneNote(index));
-                    },
-                  ),
+                  if (_score == null)
+                    const Text('Analizza un WAV per vedere tutti i pentagrammi.')
+                  else ...[
+                    SegmentedButton<PaperTone>(
+                      segments: const [
+                        ButtonSegment(value: PaperTone.ivory,
+                            label: Text('Bianco')),
+                        ButtonSegment(value: PaperTone.sepia,
+                            label: Text('Seppia')),
+                      ],
+                      selected: {_paperTone},
+                      onSelectionChanged: (tone) =>
+                        setState(() => _paperTone = tone.first),
+                    ),
+                    const SizedBox(height: 10),
+                    StudioScore(
+                      project: _score!,
+                      positionSeconds: _cursor.inMicroseconds / 1000000.0,
+                      tone: _paperTone,
+                      activeNoteId: _selectedNoteId,
+                      onTapNote: (note) => setState(() {
+                        _selectedNoteId = note.id;
+                        _selectedFamily = note.family;
+                        _notes = _score!.forFamily(note.family).map((item) =>
+                            DetectedNote(
+                              midi: item.midi,
+                              startSeconds: _score!.timeOf(item),
+                              endSeconds: _score!.timeOf(item) +
+                                item.length * 60 / (_score!.bpm * 4),
+                              confidence: item.evidence,
+                            ),
+                        ).toList();
+                      }),
+                    ),
+                  ],
                   const SizedBox(height: 8),
                   const Text(
-                    'Riconoscimento sperimentale: una nota alla volta. '
-                    'Durate approssimate, nessuna separazione strumenti.',
+                    'Tutti i registri in simultanea. Barra verde marino in '
+                    'riproduzione; battute rosse se NoteLab trova errori '
+                    'di durata/sovrapposizione.',
                     style: TextStyle(fontSize: 12,
                         color: Color(0xFF9DAABA)),
                   ),
@@ -876,6 +1072,106 @@ class _StudioPageState extends State<StudioPage> {
                       ),
                     ),
                   ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            _section(
+              icon: Icons.edit_note,
+              title: 'NoteLab · editor e revisione',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_score == null)
+                    const Text('Trascrivi prima una traccia.')
+                  else ...[
+                    Text(
+                      'Rianalizza a tempo impostato: '
+                      '${_tempoSlider.round()} BPM '
+                      '(tempo stimato originario '
+                      '≈ ${_rhythm?.bpm ?? 120} BPM)',
+                    ),
+                    Slider(
+                      value: _tempoSlider,
+                      min: 50,
+                      max: 220,
+                      divisions: 170,
+                      label: '${_tempoSlider.round()} BPM',
+                      onChanged: _busy ? null :
+                          (value) => setState(() => _tempoSlider = value),
+                    ),
+                    Wrap(spacing: 8, runSpacing: 8, children: [
+                      FilledButton.tonalIcon(
+                        onPressed: _busy ? null : _retranscribeAtBpm,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Ritrascrivi al nuovo BPM'),
+                      ),
+                      FilledButton.tonalIcon(
+                        onPressed: _busy ? null : _rebuildMidiFromScore,
+                        icon: const Icon(Icons.piano),
+                        label: const Text('Aggiorna MIDI dalle note'),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: _busy ? null : _exportMusicXml,
+                        icon: const Icon(Icons.description_outlined),
+                        label: const Text('Esporta MusicXML'),
+                      ),
+                    ]),
+                    const SizedBox(height: 13),
+                    NoteLab(
+                      score: _score!,
+                      selectedFamily: _selectedFamily,
+                      selectedNoteId: _selectedNoteId,
+                      onSelect: (item) => setState(() {
+                        _selectedNoteId = item.id;
+                        _selectedFamily = item.family;
+                      }),
+                      onChanged: _onScoreEdit,
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            _section(
+              icon: Icons.filter_alt_outlined,
+              title: 'Estrazione sperimentale WAV · offline',
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text(
+                    'Filtri DSP per ascoltare porzioni dello spettro. '
+                    'La fascia vocale è una STIMA, può contenere strumenti '
+                    'e non isola realmente il cantante; serve un modello '
+                    'di source separation per veri stem.',
+                    style: TextStyle(fontSize: 12,
+                      color: Color(0xFFAFBEC9)),
+                  ),
+                  const SizedBox(height: 8),
+                  DropdownButton<FocusStem>(
+                    isExpanded: true,
+                    value: _focusStem,
+                    items: [
+                      for (final stem in FocusStem.values)
+                        DropdownMenuItem(value: stem, child: Text(stem.title)),
+                    ],
+                    onChanged: _busy ? null :
+                        (value) => setState(() {
+                          if (value != null) _focusStem = value;
+                        }),
+                  ),
+                  Wrap(spacing: 8, runSpacing: 8, children: [
+                    FilledButton.tonalIcon(
+                      onPressed: _busy || _trackPath == null ? null : _playStem,
+                      icon: const Icon(Icons.play_circle_outline),
+                      label: const Text('Ascolta filtro'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _busy || _trackPath == null ? null : _exportStem,
+                      icon: const Icon(Icons.download_outlined),
+                      label: const Text('Salva WAV filtrato'),
+                    ),
+                  ]),
                 ],
               ),
             ),
