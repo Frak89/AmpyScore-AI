@@ -1,7 +1,0 @@
-# Self-contained static analysis config.
-analyzer:
-  exclude:
-    - "**/*.g.dart"
-linter:
-  rules:
-    avoid_print: true
