@@ -88,9 +88,6 @@ class _StudioScoreState extends State<StudioScore> {
                 final dy = event.localPosition.dy;
                 final row = ((dy - 35) / _rowHeight).floor();
                 if (row < 0 || row >= parts.length) return;
-                final tick = ((dx - _lead) / _barWidth * ticksPerBar)
-                    .floor() + ((dx - _lead) / _barWidth).floor()
-                        * (ticksPerBar - ticksPerBar);
                 final family = parts[row].family;
                 final lane = widget.project.forFamily(family);
                 if (lane.isEmpty) return;
