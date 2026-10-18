@@ -112,6 +112,8 @@ class _StudioPageState extends State<StudioPage> {
       LiveTranscriptionAccumulator();
   bool _liveProcessing = false;
   String? _liveCaptureError;
+  int _liveBpm = 120;
+  bool _liveTempoLocked = false;
 
   List<DetectedNote> _notes = const [];
   bool _multitrackMode = true;
@@ -350,6 +352,8 @@ class _StudioPageState extends State<StudioPage> {
       ));
       _liveCapture = store;
       _liveAccumulator.clear();
+      _liveBpm = 120;
+      _liveTempoLocked = false;
       _liveCaptureError = null;
       _captureWrites = Future<void>.value();
       _liveSubscription = stream.listen((bytes) {
@@ -374,6 +378,7 @@ class _StudioPageState extends State<StudioPage> {
         _notes = [];
         _score = null;
         _rhythm = null;
+        _midiReady = false;
         _status = 'Ascolto in corso';
         _analysisDuration = 0;
         _pageIndex = 0;
@@ -414,7 +419,12 @@ class _StudioPageState extends State<StudioPage> {
         return;
       }
       final rhythm = RhythmAnalyzer.estimate(parts);
-      final bpm = _tempoOverride ?? rhythm.bpm;
+      if (!_liveTempoLocked && total >= 8 &&
+          _liveAccumulator.noteCount >= 7) {
+        _liveBpm = rhythm.bpm;
+        _liveTempoLocked = true;
+      }
+      final bpm = _tempoOverride ?? _liveBpm;
       final primary = parts.where((p) =>
           p.family == InstrumentFamily.melody);
       final chosen = primary.isNotEmpty ? primary.first : parts.first;
@@ -444,15 +454,15 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _stopLiveRecording() async {
     _liveTimer?.cancel();
     _liveTimer = null;
+    if (mounted) setState(() => _recording = false);
+    await _recorder.stop();
     await _liveSubscription?.cancel();
     _liveSubscription = null;
-    await _recorder.stop();
     await _captureWrites;
     final store = _liveCapture;
     _liveCapture = null;
     if (store == null) throw StateError('Nessun audio registrato.');
     final path = await store.finish();
-    if (mounted) setState(() => _recording = false);
     if (store.frames < 16000) {
       throw StateError('Registra almeno un secondo di musica.');
     }
@@ -2244,6 +2254,17 @@ class _StudioPageState extends State<StudioPage> {
   }
 
   Widget _noteLabView() {
+    if (_recording) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Text(
+            'La partitura Live si aggiorna automaticamente. '
+            'Termina l’ascolto per modificarla in NoteLab.',
+          ),
+        ),
+      );
+    }
     final score = _score;
     if (score == null) return const Center(
       child: Padding(
