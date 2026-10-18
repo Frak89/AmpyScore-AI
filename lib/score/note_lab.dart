@@ -40,9 +40,7 @@ class NoteLab extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'NoteLab · editor reale di eventi sul rigo selezionato. '
-          'Griglia in semicrome; le pause vengono inserite '
-          'automaticamente negli spazi lasciati vuoti.',
+          'Modifica note e pause · griglia 1/16.',
           style: TextStyle(fontSize: 12, color: Color(0xFFAFBEC9)),
         ),
         const SizedBox(height: 10),
@@ -152,8 +150,7 @@ class NoteLab extends StatelessWidget {
           ),
         const SizedBox(height: 8),
         const Text(
-          'Modifiche al pentagramma e MusicXML. Il confronto MIDI viene '
-          'rigenerato con il comando Aggiorna MIDI dalle note editate.',
+          'Premi Aggiorna MIDI per ascoltare le modifiche.',
           style: TextStyle(fontSize: 12, color: Color(0xFFAFBEC9)),
         ),
       ],
