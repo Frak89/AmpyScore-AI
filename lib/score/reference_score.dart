@@ -1,6 +1,5 @@
 import 'dart:math' as math;
 import 'package:xml/xml.dart';
-import '../audio/multitrack_engine.dart';
 import '../score/score_engine.dart';
 
 class ReferenceNote {
