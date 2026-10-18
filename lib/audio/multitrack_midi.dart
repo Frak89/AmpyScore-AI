@@ -14,7 +14,7 @@ class MultiTrackMidi {
   static const int ticksPerQuarter = 480;
 
   /// Type-1 SMF with tempo track and one actual MIDI track per family.
-  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120, int beatsPerBar = 4, Map<InstrumentFamily, double>? gains}) {
+  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120, int beatsPerBar = 4, Map<InstrumentFamily, double>? gains, bool semitoneLayer = false}) {
     final output = BytesBuilder(copy: false);
     final checkedBpm = bpm.clamp(40, 240);
     final ticksPerSecond = ticksPerQuarter * checkedBpm / 60.0;
@@ -49,6 +49,13 @@ class MultiTrackMidi {
         final pitch = note.midi.clamp(0, 127);
         messages.add(_Event(first, 1, [0x90 | channel, pitch, velocity]));
         messages.add(_Event(last, 0, [0x80 | channel, pitch, 0]));
+        // Optional chromatic thickening, deliberately off by default.
+        // +1 semitone is a dissonance, NOT higher-resolution sampling.
+        if (semitoneLayer && !part.percussion && pitch < 127) {
+          final quiet = math.max(1, (velocity * .16).round());
+          messages.add(_Event(first, 1, [0x90 | channel, pitch + 1, quiet]));
+          messages.add(_Event(last, 0, [0x80 | channel, pitch + 1, 0]));
+        }
       }
       messages.sort((a, b) {
         final tick = a.tick.compareTo(b.tick);
