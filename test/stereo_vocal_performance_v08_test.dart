@@ -36,7 +36,7 @@ Uint8List fakeStereo({
   for(var i=0;i<count;i++){
     final t=i/sampleRate;
     final voice=.55*math.sin(2*math.pi*440*t);
-    final guitar=stereoSides?.3*math.sin(2*math.pi*660*t):0.0;
+    final guitar=stereoSides ? .3 * math.sin(2 * math.pi * 660 * t) : 0.0;
     bd.setInt16(44+4*i,((voice+guitar)*32767).round(),Endian.little);
     bd.setInt16(46+4*i,(voice*32767).round(),Endian.little);
   }
