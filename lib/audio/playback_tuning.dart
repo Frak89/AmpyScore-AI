@@ -13,8 +13,12 @@ class PlaybackTuning {
       proposed.isFinite ? proposed.clamp(minSpeed, maxSpeed).toDouble() : normalSpeed;
 
   static String speedLabel(double speed) {
-    final fixed = speed.toStringAsFixed(2);
-    return '${fixed.replaceFirst(RegExp(r'0+$'), '').replaceFirst(RegExp(r'\\.$'), '')}×';
+    final noZeros = speed.toStringAsFixed(2)
+        .replaceFirst(RegExp(r'0+$'), '');
+    final clean = noZeros.endsWith('.')
+        ? noZeros.substring(0, noZeros.length - 1)
+        : noZeros;
+    return '$clean×';
   }
 
   static bool supportsBuffer(int value) => bufferFrames.contains(value);
