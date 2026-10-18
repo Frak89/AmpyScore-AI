@@ -37,6 +37,8 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
   static const _barWidth = 190.0;
   static const _lead = 130.0;
   static const _rowHeight = 92.0;
+  static const _pageBars = 8;
+  int _firstBar = 0;
 
   @override
   void initState() {
@@ -49,21 +51,22 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
   @override
   void didUpdateWidget(covariant StudioScore oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if ((widget.positionSeconds - oldWidget.positionSeconds).abs() < 0.07) {
-      return;
+    if (oldWidget.project != widget.project) _firstBar = 0;
+    final seconds = widget.positionSeconds;
+    final bars = widget.project.beatsPerBar;
+    final bar = (seconds * widget.project.bpm / (60 * bars))
+        .floor().clamp(0, widget.project.barCount - 1);
+    if (bar < _firstBar || bar >= _firstBar + _pageBars) {
+      setState(() => _firstBar = (bar ~/ _pageBars) * _pageBars);
+      if (_scroll.hasClients) _scroll.jumpTo(0);
     }
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || !_scroll.hasClients) return;
-      final ticks = widget.positionSeconds * widget.project.bpm * ticksPerQuarter / 60;
-      final x = _lead + ticks / ticksPerBar * _barWidth;
-      final target = (x - _scroll.position.viewportDimension * 0.48)
-          .clamp(0.0, _scroll.position.maxScrollExtent).toDouble();
-      if ((_scroll.offset - target).abs() > _scroll.position.viewportDimension * .35) {
-        _scroll.animateTo(target,
-            duration: const Duration(milliseconds: 230),
-            curve: Curves.easeOut);
-      }
-    });
+  }
+
+  void _navigate(int direction) {
+    final maxFirst = math.max(0, widget.project.barCount - 1);
+    setState(() => _firstBar =
+        (_firstBar + direction * _pageBars).clamp(0, maxFirst));
+    if (_scroll.hasClients) _scroll.jumpTo(0);
   }
 
   @override
@@ -77,7 +80,8 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
   @override
   Widget build(BuildContext context) {
     final parts = widget.project.parts;
-    final width = _lead + widget.project.barCount * _barWidth + 32;
+    final endBar = math.min(widget.project.barCount, _firstBar + _pageBars);
+    final width = _lead + (endBar - _firstBar) * _barWidth + 32;
     final height = 38.0 + parts.length * _rowHeight + 22.0;
     final cream = widget.tone == PaperTone.sepia;
     final paper = cream ? const Color(0xFFF2E5CA) : const Color(0xFFFAFAF8);
@@ -96,7 +100,8 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
         var bestDistance = double.infinity;
         for (final note in lane) {
           final centerX = _lead +
-              (note.start + note.length / 2) * _barWidth / ticksPerBar;
+              (note.start + note.length / 2 - _firstBar * widget.project.barTicks) *
+                _barWidth / widget.project.barTicks;
           final distance = (dx - centerX).abs();
           if (distance < bestDistance && distance <= 30) {
             chosen = note;
@@ -116,6 +121,8 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
             ink,
             widget.activeNoteId,
             _blink.value,
+            _firstBar,
+            endBar,
           ),
         ),
       ),
@@ -157,6 +164,24 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
                     child: content,
                   )
                 : content,
+          ),
+          Positioned(
+            left: 4, top: 4,
+            child: DecoratedBox(
+              decoration: BoxDecoration(color: const Color(0xD9152732),
+                borderRadius: BorderRadius.circular(10)),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(tooltip: 'Battute precedenti',
+                  onPressed: _firstBar > 0 ? () => _navigate(-1) : null,
+                  icon: const Icon(Icons.chevron_left, color: Colors.white)),
+                Text('${_firstBar + 1}–$endBar',
+                  style: const TextStyle(color: Colors.white)),
+                IconButton(tooltip: 'Battute successive',
+                  onPressed: endBar < widget.project.barCount
+                      ? () => _navigate(1) : null,
+                  icon: const Icon(Icons.chevron_right, color: Colors.white)),
+              ]),
+            ),
           ),
           if (_zoomEnabled)
             Positioned(
@@ -213,12 +238,15 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
 }
 
 class _StudioPainter extends CustomPainter {
-  const _StudioPainter(this.score, this.position, this.ink, this.selected, this.blink);
+  const _StudioPainter(this.score, this.position, this.ink,
+      this.selected, this.blink, this.firstBar, this.lastBar);
   final ScoreProject score;
   final double position;
   final Color ink;
   final int? selected;
   final double blink;
+  final int firstBar;
+  final int lastBar;
 
   static const double lead = 130;
   static const double bw = 190;
@@ -231,7 +259,7 @@ class _StudioPainter extends CustomPainter {
     final main = Paint()..color = ink..strokeWidth = 1.15;
     final weak = Paint()..color = ink.withValues(alpha: .26)..strokeWidth = .8;
     _text(canvas, 'AmpyScore Studio', 15, 5, 15, ink, bold: true);
-    _text(canvas, '4/4  ·  ♩ = ${score.bpm} BPM',
+    _text(canvas, '${score.beatsPerBar}/4  ·  ♩ = ${score.bpm} BPM',
         165, 7, 12, ink);
     for (var p = 0; p < score.parts.length; p++) {
       final part = score.parts[p];
@@ -249,8 +277,8 @@ class _StudioPainter extends CustomPainter {
       final isDrums = part.family == InstrumentFamily.drums;
       _text(canvas, isDrums ? 'Ⅱ' : isBass ? '𝄢' : '𝄞',
           lead + 3, y + 7, 27, ink);
-      for (final measure in score.measures(part.family)) {
-        final x0 = lead + measure.index * bw;
+      for (final measure in score.measuresRange(part.family, firstBar, lastBar)) {
+        final x0 = lead + (measure.index - firstBar) * bw;
         final x1 = x0 + bw;
         if (measure.overflow) {
           canvas.drawRect(
@@ -263,12 +291,12 @@ class _StudioPainter extends CustomPainter {
         }
         canvas.drawLine(Offset(x1, y + 10), Offset(x1, y + 50), main);
         _text(canvas, '${measure.index + 1}', x0 + 9, y - 14, 10, ink);
-        for (var beat = 1; beat < 4; beat++) {
-          final x = x0 + beat * bw / 4;
+        for (var beat = 1; beat < score.beatsPerBar; beat++) {
+          final x = x0 + beat * bw / score.beatsPerBar;
           canvas.drawLine(Offset(x, y + 12), Offset(x, y + 52), weak);
         }
         for (final cell in measure.cells) {
-          final x = lead + (cell.start + cell.length / 2) *
+          final x = lead + (cell.start + cell.length / 2 - firstBar * score.barTicks) *
               bw / ticksPerBar;
           if (cell.isRest) {
             final symbol = switch (cell.length) {
@@ -327,8 +355,8 @@ class _StudioPainter extends CustomPainter {
         }
         // Explicitly join nearby eighths/sixteenths with beams per beat.
         // Do not beam across rests, quarter boundaries or ties.
-        for (var beat = 0; beat < 4; beat++) {
-          final startBeat = measure.index * ticksPerBar + beat * ticksPerQuarter;
+        for (var beat = 0; beat < score.beatsPerBar; beat++) {
+          final startBeat = measure.index * score.barTicks + beat * ticksPerQuarter;
           final endBeat = startBeat + ticksPerQuarter;
           final groups = <List<ScoreCell>>[];
           var currentGroup = <ScoreCell>[];
@@ -358,14 +386,14 @@ class _StudioPainter extends CustomPainter {
                   isBass, isDrums) - 27);
             }
             final xFirst = lead +
-                (group.first.start + group.first.length / 2) * bw /
+                (group.first.start + group.first.length / 2 - firstBar * score.barTicks) * bw /
                     ticksPerBar + 5;
             final xLast = lead +
-                (group.last.start + group.last.length / 2) * bw /
+                (group.last.start + group.last.length / 2 - firstBar * score.barTicks) * bw /
                     ticksPerBar + 5;
             for (final cell in group) {
               final stemX = lead +
-                  (cell.start + cell.length / 2) * bw / ticksPerBar + 5;
+                  (cell.start + cell.length / 2 - firstBar * score.barTicks) * bw / score.barTicks + 5;
               final noteY = _noteY(cell.note!.midi, bottom, isBass, isDrums);
               canvas.drawLine(Offset(stemX, noteY),
                   Offset(stemX, beamY), Paint()
@@ -379,9 +407,9 @@ class _StudioPainter extends CustomPainter {
               final a = shortGroup[j];
               final b = shortGroup[j + 1];
               if (a.start + a.length != b.start) continue;
-              final xa = lead + (a.start + a.length / 2) * bw /
+              final xa = lead + (a.start + a.length / 2 - firstBar * score.barTicks) * bw /
                   ticksPerBar + 5;
-              final xb = lead + (b.start + b.length / 2) * bw /
+              final xb = lead + (b.start + b.length / 2 - firstBar * score.barTicks) * bw /
                   ticksPerBar + 5;
               canvas.drawLine(Offset(xa, beamY + 6),
                   Offset(xb, beamY + 6),
@@ -393,7 +421,8 @@ class _StudioPainter extends CustomPainter {
     }
     // Single marine-green playhead through every simultaneous staff.
     final tick = position * score.bpm * ticksPerQuarter / 60;
-    final cursorX = lead + tick / ticksPerBar * bw;
+    final cursorX = lead + (tick - firstBar * score.barTicks) /
+        score.barTicks * bw;
     final cursor = Paint()
       ..color = const Color(0xFF0E9B7A)
       ..strokeWidth = 3.5;
@@ -442,5 +471,6 @@ class _StudioPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _StudioPainter old) =>
       old.score != score || old.position != position ||
-      old.ink != ink || old.selected != selected || old.blink != blink;
+      old.ink != ink || old.selected != selected || old.blink != blink ||
+      old.firstBar != firstBar || old.lastBar != lastBar || true;
 }
