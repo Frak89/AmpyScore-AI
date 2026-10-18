@@ -458,8 +458,12 @@ class _StudioPageState extends State<StudioPage> {
       _partGains[part.family] = InstrumentHeuristics.level(part);
     }
     if (allNotes) {
-      await _renderMultiPreview(parts, duration);
       await _loadSoundfontMidi(parts, rhythm.bpm);
+      if (_soundfontReady) {
+        await _renderSilentMidiClock(duration);
+      } else {
+        await _renderMultiPreview(parts, duration);
+      }
     }
     await _player.seek(Duration.zero);
     if (mounted) setState(() {
@@ -567,8 +571,12 @@ class _StudioPageState extends State<StudioPage> {
     await _pauseTransport();
     await _midiPlayer.stop();
     final parts = _editedParts();
-    await _renderMultiPreview(parts, score.durationSeconds);
     await _loadSoundfontMidi(parts, score.bpm);
+    if (_soundfontReady) {
+      await _renderSilentMidiClock(_durationSeconds);
+    } else {
+      await _renderMultiPreview(parts, _durationSeconds);
+    }
     await _seekTransport(oldCursor);
     if (mounted) {
       setState(() {
@@ -787,6 +795,55 @@ class _StudioPageState extends State<StudioPage> {
       await _midiPlayer.setVolume(_midiVolume);
       if (mounted) setState(() =>
         _status = 'SoundFont non disponibile; audio di riserva: $error');
+    }
+  }
+
+  /// Native SoundFont already produces sound. Generate only a silent WAV
+  /// player clock to keep timeline/seek aligned without expensive software
+  /// PCM synthesis or requiring the original audio in MIDI-only mode.
+  Future<void> _renderSilentMidiClock(double duration) async {
+    const sampleRate = 16000;
+    final frames = (duration * sampleRate).ceil();
+    if (frames > 1000000000) {
+      throw const FormatException('Brano troppo lungo per WAV clock.');
+    }
+    final dir = await getApplicationDocumentsDirectory();
+    final path = '${dir.path}/ampyscore_clock_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav';
+    final f = File(path);
+    final writer = await f.open(mode: FileMode.write);
+    try {
+      final head = Uint8List(44);
+      final bytes = ByteData.sublistView(head);
+      void tag(int at, String value) {
+        for (var i = 0; i < value.length; i++) {
+          head[at + i] = value.codeUnitAt(i);
+        }
+      }
+      tag(0, 'RIFF'); tag(8, 'WAVE'); tag(12, 'fmt ');
+      tag(36, 'data');
+      bytes.setUint32(4, frames * 2 + 36, Endian.little);
+      bytes.setUint32(16, 16, Endian.little);
+      bytes.setUint16(20, 1, Endian.little);
+      bytes.setUint16(22, 1, Endian.little);
+      bytes.setUint32(24, sampleRate, Endian.little);
+      bytes.setUint32(28, sampleRate * 2, Endian.little);
+      bytes.setUint16(32, 2, Endian.little);
+      bytes.setUint16(34, 16, Endian.little);
+      bytes.setUint32(40, frames * 2, Endian.little);
+      await writer.setLength(44 + frames * 2);
+      await writer.setPosition(0);
+      await writer.writeFrom(head);
+      await writer.flush();
+    } finally {
+      await writer.close();
+    }
+    final old = _lastMixPath;
+    await _midiPlayer.setFilePath(path);
+    await _midiPlayer.setVolume(0);
+    _lastMixPath = path;
+    if (old != null && old != path) {
+      try { await File(old).delete(); } catch (_) {}
     }
   }
 
@@ -1212,10 +1269,13 @@ class _StudioPageState extends State<StudioPage> {
         await _pauseTransport();
         await _midiPlayer.stop();
         final adjusted = _editedParts();
-        await _renderMultiPreview(adjusted,
-            _score?.durationSeconds ?? _durationSeconds);
         await _loadSoundfontMidi(adjusted,
             _score?.bpm ?? _rhythm?.bpm ?? 120);
+        if (_soundfontReady) {
+          await _renderSilentMidiClock(_durationSeconds);
+        } else {
+          await _renderMultiPreview(adjusted, _durationSeconds);
+        }
         await _seekTransport(oldCursor);
         if (resume && previousMode != null && mounted) {
           setState(() {
