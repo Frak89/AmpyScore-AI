@@ -36,9 +36,7 @@ class MultiTrackPanel extends StatelessWidget {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const Text(
-          'Le tracce sono gruppi di frequenze: non è ancora possibile '
-          'confermare se lo strumento reale sia basso, chitarra o piano. '
-          'Seleziona una parte per vederne il pentagramma.',
+          'Riconoscimento per registro · stima sperimentale.',
           style: TextStyle(color: Color(0xFFB7C7D0), fontSize: 12),
         ),
         const SizedBox(height: 12),

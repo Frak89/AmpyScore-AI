@@ -1,64 +1,43 @@
-# AmpyScore AI v0.3 — MIDI multitraccia e tempo stimato
+# AmpyScore Studio 0.5
 
-Applicazione Flutter open source Android / iOS.
+Studio musicale gratuito, open source (MIT) e offline per Android e iOS. La UI principale contiene **Studio**, **NoteLab** e **Tracce**.
 
-## v0.3: come provarla
+## Importazione audio
 
-1. Apri **Demo multistrumento** (generata sul dispositivo: basso sintetico, registro medio, registro acuto e transienti ritmici).
-2. Lascia acceso **Analisi multitraccia** e premi **Analizza WAV**.
-3. Leggi **Tempo stimato ≈ N BPM** e le durate ipotizzate **1/16 (semicroma), 1/8 (croma), 1/4 (semiminima), 1/2 (minima)**; appaiono solo i valori che risultano dagli eventi rilevati. La precisione non è garantita.
-4. Tocca un gruppo/registro per visualizzare lo spartito di quella parte e ascoltare le singole note.
-5. Regola il volume di ogni gruppo (oppure usa **Solo**); il mix MIDI locale viene rigenerato al rilascio del cursore. Il brano originale ha un volume indipendente.
-6. Scegli **Solo brano**, **Solo MIDI** o **Ascolta insieme**. **Esporta .mid** produce un file MIDI tipo 1 con tracce e canali distinti.
-7. Per tornare alla trascrizione monofonica YIN, spegni **Analisi multitraccia** e premi nuovamente Analizza WAV.
+Premi **Apri brano** e seleziona un file audio (WAV, MP3, M4A, AAC, FLAC, OGG, OPUS, AIFF, CAF; altri formati decodificabili dal sistema). L'app conserva il file originale per l'ascolto e lo converte localmente in PCM WAV 16-bit mono 16 kHz per l'analisi, usando le API native del telefono. Il plugin `audio_decoder` è MIT e non utilizza server o FFmpeg esterno.
 
-**Limitazioni sostanziali:** l'algoritmo in questa versione è una **euristica DSP locale per frequenze**: identifica gruppi di registri, **non riconosce il timbro o il vero strumento musicale**. Non separa audio stem e può attribuire armoniche di una sorgente a strumenti fittizi; non è un modello di IA. La precisione è molto migliore sulla demo sintetica che su registrazioni polifoniche reali. Il rilevamento del tempo è orientativo (anche possibile mezzo/doppio tempo) e il 4/4 inserito nel file MIDI è un **default**, non un riconoscimento della metrica. Il mix MIDI ha timbri sintetici approssimati; rigenerare il mix interrompe brevemente la riproduzione. Gli audio WAV importati sono limitati a PCM 16-bit, max 32 MB e analisi max 40 secondi.
+L'importazione **avvia direttamente la trascrizione e lo spartito**, senza ulteriori pulsanti. Anche la demo e la registrazione dal microfono si analizzano automaticamente. Nel menu in alto si può scegliere tra analisi multitraccia euristica e melodia singola.
 
-## Privacy
+**Limiti:** 96 MB per il file importato, 48 MB per il WAV decodificato, primi 40 secondi analizzati. La compatibilità con alcuni codec varia fra Android e iOS e con le capacità del dispositivo. Audio DRM protetto non è supportato.
 
-Trascrizione, sintesi, BPM e MIDI restano offline. **ChatGPT** è la funzione online opzionale già presente in v0.1: invia solo sequenze testuali di note quando richiesta esplicitamente, richiede una chiave OpenAI e può avere costi API.
+## Interfaccia
+
+- **Studio:** carta musicale bianca o seppia, spartito con barra scorrevole, comandi Audio / MIDI / Insieme, due volumi, esportazione MIDI e MusicXML.
+- **NoteLab:** modifica note e pause, tempo BPM, controllo battute 4/4 e rigenerazione MIDI.
+- **Tracce:** selezione registri, solo/mixer, filtri WAV locali. ChatGPT opzionale online resta nascosto in un pannello secondario.
+
+## Stato del motore
+
+La trascrizione multitraccia usa **analisi spettrale per registri**, non un modello IA per riconoscere con certezza singoli strumenti; il filtro di frequenze non estrae una voce pulita. I valori percentuali di affidabilità sono **stime interne**, non accuratezze misurate rispetto a una partitura di riferimento. L'editor suddivide su griglia 4/4; la metrica reale e le alterazioni non sono ancora riconosciute con precisione professionale.
+
+Le funzioni locali sono interamente offline. **ChatGPT** è facoltativo: invia soltanto note testuali all'API OpenAI su richiesta esplicita, con Internet e chiave API separata.
 
 ## Build
 
-- Installare Flutter SDK.
-- `flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .`
-- `python3 tool/configure_platforms.py` (Windows: `py -3 tool/configure_platforms.py`).
-- `flutter pub get`
-- `flutter test`
-- `flutter build apk --debug`
+Requisiti: Flutter SDK 3.47+ (Dart 3.10+) e Android SDK; per iOS, macOS + Xcode.
 
-GitHub Actions genera l'artefatto **ampyscore-debug-apk** per Android. La build iOS richiede macOS/Xcode. Il repository è distribuito con licenza MIT.
+```bash
+flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
+python3 tool/configure_platforms.py
+flutter pub get
+flutter test
+flutter build apk --debug
+```
 
-## Prossime tappe
+GitHub Actions **Android debug APK** esegue analisi, test e build e pubblica l'artefatto `ampyscore-debug-apk`. È una build di test, non una release firmata.
 
-Per riconoscere veri strumenti con affidabilità serve integrare **source separation e trascrizione con modelli IA offline**, ottimizzati per Android e iOS. L'attuale classificazione per registri è il prototipo da confrontare con la demo e non va confusa con questo obiettivo.
+## Motori upstream
 
-
-## Versione 0.4 — Studio Score e NoteLab (funzioni sperimentali)
-
-Questa versione rende la partitura **più compatta** e presenta **tutti i pentagrammi contemporaneamente** allineati in battute di **4/4**. La barra di lettura **verde marino** segue il tempo della canzone; battute con note sovrapposte o durate complessive superiori a 4/4 vengono marcate **in rosso**. La pagina dello spartito può essere impostata su **bianco ad alto contrasto** oppure **seppia chiaro** con inchiostro scuro. La visualizzazione imita una pagina cartacea, **non è un renderer PDF completo**.
-
-Lo score engine:
-- ricostruisce lunghezze su griglia di semicrome; include 1/2, 1/4, 1/8, 1/16, valori puntati, pause, stanghette 4/4 e note legate a cavallo di due battute;
-- espone il comando **Esporta MusicXML**, compatibile in linea di principio con software di notazione per successive correzioni;
-- offre **NoteLab** per modificare altezza, posizione, durata, aggiungere/cancellare note o inserire una pausa 1/16. Le modifiche aggiornano lo spartito; **Aggiorna MIDI dalle note** rigenera l'audio per confrontarlo con l'originale;
-- consente di cambiare BPM e **Ritrascrivi al nuovo BPM** (l'analisi dello spettro riparte e la quantizzazione viene ricostruita; le precedenti modifiche manuali non vengono mantenute);
-- per ciascun rigo visualizza un **indice di affidabilità % stimato** da punteggi interni e diagnostica temporale. **Non è una misurazione dell'accuratezza della trascrizione**, perché non esiste uno spartito di riferimento da confrontare; le etichette di strumento restano ipotesi per registro.
-
-**Estrazione audio locale:** dal pannello **Estrazione sperimentale WAV** puoi ascoltare ed esportare filtri separati per basse, medie, alte frequenze, transienti e una **banda candidata vocale**. I filtri non eliminano le altre sorgenti nella stessa banda: **non sono una separazione affidabile degli strumenti e non estraggono una vera voce pulita**. È una funzione sperimentale verificabile mediante ascolto.
-
-### Piano tecnico documentato
-
-- Per vera separazione **voce / basso / batteria / altri**: studiare Demucs (MIT) e alternative più leggere convertibili in ONNX/TFLite, con test di RAM, velocità e licenza dei pesi.
-- Per trascrizione polifonica di **una sorgente separata**: Basic Pitch (Apache-2.0), ottimizzazione e conversione a motore on-device, dopo verifica su segnali vocali/musicali.
-- Per incisione musicale professionale: **Verovio (LGPL)** e **OpenSheetMusicDisplay (licenza del progetto da verificare per la distribuzione)** possono ricevere il MusicXML ora generato. Richiedono integrazione del renderer sul dispositivo prima di dichiarare conforme la notazione finale.
-- Convalida indispensabile su audio reale con MusicXML originale: accuratezza per pitch/onset/offset, F1 del riconoscimento strumenti, WER? (non adatto), e SDR/SI-SDR degli stem. Solo così la percentuale può chiamarsi *accuratezza*.
-
-Riferimenti:
-- https://github.com/vvigot/demucs
-- https://github.com/spotify/basic-pitch
-- https://github.com/rism-digital/verovio
-- https://github.com/opensheetmusicdisplay/opensheetmusicdisplay
-- https://pub.dev/packages/onnxruntime_v2
-
-**Avvertenze:** non sono ancora incorporati pesi IA pretrained o soundfont con licenza verificata. Le note estratte restano approssimate, specialmente su brani con strumenti sovrapposti. La qualità del display, la stampa PDF, la metrica reale diversa da 4/4 e l'accuratezza con riferimento richiedono sviluppo ulteriore. Nessun server è necessario per le nuove funzioni locali.
+- `audio_decoder` (MIT) usa MediaExtractor/MediaCodec su Android e AVFoundation su iOS: https://pub.dev/packages/audio_decoder
+- `file_picker` (MIT) importa file locali: https://pub.dev/packages/file_picker
+- Prossima milestone: test reale su brani polifonici, modelli on-device di separazione e trascrizione; non dichiarare accuratezza misurata prima di avere dataset e ground truth.
