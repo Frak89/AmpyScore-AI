@@ -1798,7 +1798,7 @@ class _StudioPageState extends State<StudioPage> {
         title: const Row(children: [
           Icon(Icons.graphic_eq_rounded, color: Color(0xFF62DFC3)),
           SizedBox(width: 10),
-          Text('AmpyScore Studio',
+          Text('AmpyScore AI',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20)),
         ]),
         actions: [
@@ -1813,8 +1813,10 @@ class _StudioPageState extends State<StudioPage> {
         selectedIndex: _pageIndex,
         onDestinationSelected: (value) => setState(() => _pageIndex = value),
         destinations: const [
+          NavigationDestination(icon: Icon(Icons.mic_none),
+              selectedIcon: Icon(Icons.mic), label: 'Ascolta'),
           NavigationDestination(icon: Icon(Icons.library_music_outlined),
-              selectedIcon: Icon(Icons.library_music), label: 'Studio'),
+              selectedIcon: Icon(Icons.library_music), label: 'Spartito'),
           NavigationDestination(icon: Icon(Icons.edit_note_outlined),
               selectedIcon: Icon(Icons.edit_note), label: 'NoteLab'),
           NavigationDestination(icon: Icon(Icons.tune_outlined),
@@ -1827,26 +1829,171 @@ class _StudioPageState extends State<StudioPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
           children: [
-            if (_pageIndex == 0) _importToolbar(),
+            if (_pageIndex == 1) _importToolbar(),
             if (_busy) ...[
               const SizedBox(height: 10),
               LinearProgressIndicator(minHeight: 3,
                 value: _analysisProgress > 0 ? _analysisProgress : null),
             ],
-            if (!_busy && _trackPath != null && _pageIndex == 0) ...[
+            if (!_busy && _trackPath != null && _pageIndex == 1) ...[
               const SizedBox(height: 8),
               Text(_status,
                 style: const TextStyle(fontSize: 12, color: Color(0xFFA2B6C1)),
                 maxLines: 1, overflow: TextOverflow.ellipsis),
             ],
             const SizedBox(height: 12),
-            if (_pageIndex == 0) _studioView(ready),
-            if (_pageIndex == 1) _noteLabView(),
-            if (_pageIndex == 2) _tracksView(),
-            if (_pageIndex == 3) _settingsView(),
+            if (_pageIndex == 0) _listenHome(),
+            if (_pageIndex == 1) _studioView(ready),
+            if (_pageIndex == 2) _noteLabView(),
+            if (_pageIndex == 3) _tracksView(),
+            if (_pageIndex == 4) _settingsView(),
           ],
         ),
       ),
+    );
+  }
+
+  /// The original product vision is the home screen rather than an
+  /// advanced tab: listen to music and turn it into an instrument score.
+  Widget _listenHome() {
+    final score = _score;
+    final live = _recording;
+    final duration = _liveCapture?.durationSeconds ??
+        _analysisDuration;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('Ascolta e trascrivi',
+          style: TextStyle(fontSize: 25,
+              fontWeight: FontWeight.w750)),
+        const SizedBox(height: 6),
+        Text(
+          live ? 'Trascrizione progressiva dal microfono'
+               : 'Dalla musica a uno spartito per ogni parte',
+          style: const TextStyle(
+            color: Color(0xFFABBBC6), fontSize: 13),
+        ),
+        const SizedBox(height: 20),
+        Card(
+          color: const Color(0xFF172832),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(children: [
+              Icon(live ? Icons.graphic_eq_rounded : Icons.mic_rounded,
+                color: live
+                    ? const Color(0xFF62DFC3)
+                    : const Color(0xFFB4EBD9),
+                size: 54),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _toggleRecording,
+                  icon: Icon(live ? Icons.stop_circle : Icons.mic),
+                  label: Text(live
+                    ? 'Termina e completa lo spartito'
+                    : 'Ascolta dal microfono'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: live || _busy ? null : _import,
+                  icon: const Icon(Icons.audio_file_outlined),
+                  label: const Text('Apri una canzone'),
+                ),
+              ),
+              if (live) ...[
+                const SizedBox(height: 14),
+                Text(_clock(duration), style:
+                  const TextStyle(fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    fontFeatures: [FontFeature.tabularFigures()])),
+                const SizedBox(height: 5),
+                Text('Note rilevate: ${_liveAccumulator.noteCount}',
+                  style: const TextStyle(color: Color(0xFF94D9C4))),
+              ],
+            ]),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (_busy)
+          const LinearProgressIndicator(minHeight: 3),
+        if (live || score != null) ...[
+          const SizedBox(height: 14),
+          Row(children: [
+            const Expanded(child: Text('Partitura multitraccia',
+              style: TextStyle(fontSize: 18,
+                fontWeight: FontWeight.w700))),
+            if (_rhythm != null)
+              Text('≈ ${_rhythm!.bpm} BPM',
+                style: const TextStyle(color: Color(0xFF62DFC3))),
+          ]),
+          const SizedBox(height: 8),
+          if (score != null && score.parts.isNotEmpty)
+            StudioScore(
+              project: score,
+              positionSeconds: live ? duration :
+                  _cursor.inMicroseconds / 1000000.0,
+              tone: _paperTone,
+              activeNoteId: null,
+              onFullScreen: live ? null :
+                  () => setState(() => _forceScoreFullScreen = true),
+              onTapNote: live ? null :
+                  (note) => unawaited(_jumpToNote(note)),
+            )
+          else
+            const SizedBox(
+              height: 120,
+              child: Center(
+                child: Text('Rilevamento delle prime note…')),
+            ),
+          const SizedBox(height: 13),
+          for (final part in _parts)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(switch(part.family) {
+                InstrumentFamily.melody => Icons.music_note,
+                InstrumentFamily.harmony => Icons.piano,
+                InstrumentFamily.bass => Icons.graphic_eq,
+                InstrumentFamily.drums => Icons.album_outlined,
+              }, color: const Color(0xFF80DCC2)),
+              title: Text(part.name),
+              trailing: Text('${part.notes.length} note',
+                style: const TextStyle(fontSize: 12)),
+              onTap: live ? null : () {
+                _selectFamily(part.family);
+                setState(() => _pageIndex = 1);
+              },
+            ),
+          if (!live)
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              FilledButton.tonalIcon(
+                onPressed: () => setState(() => _pageIndex = 1),
+                icon: const Icon(Icons.library_music),
+                label: const Text('Apri spartito'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => setState(() => _pageIndex = 3),
+                icon: const Icon(Icons.multitrack_audio),
+                label: const Text('Ascolta le parti'),
+              ),
+            ]),
+        ],
+        if (!live && score == null)
+          const Padding(
+            padding: EdgeInsets.only(top: 15),
+            child: Text(
+              'La trascrizione Live si aggiorna ogni pochi secondi; '
+              'quando termini, viene completata sull’intera registrazione.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF8DA4AD),
+                fontSize: 12),
+            ),
+          ),
+      ],
     );
   }
 
