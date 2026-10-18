@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -773,11 +772,11 @@ class _StudioPageState extends State<StudioPage> {
         // Metadata service unavailable: public score searches still work.
       }
       if (!mounted) return;
-      _songResults = matches;
+      setState(() => _songResults = matches);
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Cerca partiture'),
+          title: Text('Cerca partiture · ${_songResults.length} brani'),
           content: SizedBox(
             width: 470,
             child: SingleChildScrollView(child: Column(
@@ -1578,7 +1577,7 @@ class _StudioPageState extends State<StudioPage> {
       allowedExtensions: ['musicxml', 'xml'],
     );
     if (file == null) return;
-    if (await file.length() > 12 * 1024 * 1024) {
+    if ((await file.length()) > 12 * 1024 * 1024) {
       throw const FormatException('MusicXML troppo grande.');
     }
     final xml = utf8.decode(await file.readAsBytes(), allowMalformed: false);
