@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../audio/multitrack_engine.dart';
 import '../score/score_engine.dart';
 
 enum PaperTone { ivory, sepia }
@@ -203,7 +204,7 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
 
   void _zoom(double factor) {
     final value = _transformation.value.clone();
-    value.scale(factor);
+    value.scaleByDouble(factor, factor, factor, 1);
     final scale = value.getMaxScaleOnAxis();
     if (scale >= 0.65 && scale <= 5) {
       _transformation.value = value;
