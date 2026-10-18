@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:audio_decoder/audio_decoder.dart';
 import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
@@ -21,6 +23,8 @@ import 'audio/midi_engine.dart';
 import 'audio/playback_tuning.dart';
 import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
+import 'audio/gm_catalog.dart';
+import 'audio/stereo_center_voice.dart';
 import 'audio/instrument_heuristics.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
@@ -28,6 +32,7 @@ import 'audio/stem_extractor.dart';
 import 'audio/stereo_vocal_reducer.dart';
 import 'audio/band_focus_renderer.dart';
 import 'score/score_engine.dart';
+import 'score/score_pdf.dart';
 import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
 import 'score/reference_score.dart';
@@ -118,15 +123,8 @@ class _StudioPageState extends State<StudioPage> {
     InstrumentFamily.harmony: 0,
     InstrumentFamily.melody: 65,
   };
-  static const Map<int, String> _gmNames = {
-    0: 'Pianoforte', 1: 'Pianoforte brillante',
-    24: 'Chitarra nylon', 25: 'Chitarra acustica',
-    26: 'Chitarra elettrica', 32: 'Contrabbasso',
-    33: 'Basso elettrico', 40: 'Violino',
-    48: 'Archi', 56: 'Tromba', 57: 'Trombone',
-    65: 'Sax contralto', 66: 'Sax tenore',
-    73: 'Flauto', 80: 'Sintetizzatore',
-  };
+  int? _percussionKeyOverride;
+  bool _semitoneLayer = false;
   final Map<InstrumentFamily, InstrumentGuess> _instrumentGuesses = {};
   final Map<InstrumentFamily, double> _partGains = {
     for (final family in InstrumentFamily.values) family: 0.90,
@@ -546,7 +544,18 @@ class _StudioPageState extends State<StudioPage> {
   List<InstrumentPart> _withPrograms(List<InstrumentPart> parts) => [
     for (final p in parts)
       InstrumentPart(
-        family: p.family, notes: p.notes, confidence: p.confidence,
+        family: p.family,
+        notes: [
+          for (final note in p.notes)
+            DetectedNote(
+              midi: p.percussion && _percussionKeyOverride != null
+                  ? _percussionKeyOverride! : note.midi,
+              startSeconds: note.startSeconds,
+              endSeconds: note.endSeconds,
+              confidence: note.confidence,
+            ),
+        ],
+        confidence: p.confidence,
         programOverride: _gmPrograms[p.family] ?? p.programOverride,
         signalLevel: p.signalLevel,
       ),
@@ -794,7 +803,8 @@ class _StudioPageState extends State<StudioPage> {
         assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
       await _synth.loadMidiData(
         data: MultiTrackMidi.export(_withPrograms(parts), bpm: bpm,
-          beatsPerBar: _beatsPerBar, gains: _partGains),
+          beatsPerBar: _beatsPerBar, gains: _partGains,
+          semitoneLayer: _semitoneLayer),
         sfId: _soundfontId!,
       );
       await _synth.setMidiTempo(_playbackSpeed);
@@ -1447,11 +1457,11 @@ class _StudioPageState extends State<StudioPage> {
         final score = _score;
     final bytes = score != null
         ? MultiTrackMidi.export(_withPrograms(_editedParts()), bpm: score.bpm,
-            beatsPerBar: _beatsPerBar)
+            beatsPerBar: _beatsPerBar, semitoneLayer: _semitoneLayer)
         : _parts.isEmpty
             ? MidiEngine.exportMidi(_notes)
             : MultiTrackMidi.export(_withPrograms(_parts), bpm: _rhythm?.bpm ?? 120,
-            beatsPerBar: _beatsPerBar);
+            beatsPerBar: _beatsPerBar, semitoneLayer: _semitoneLayer);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
           fileName: _parts.isEmpty
