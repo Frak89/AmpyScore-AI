@@ -624,7 +624,7 @@ class _StudioPageState extends State<StudioPage> {
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: const Text('Corrispondenze per titolo'),
+          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
           content: SizedBox(
             width: 460,
             child: candidates.isEmpty
@@ -916,6 +916,70 @@ class _StudioPageState extends State<StudioPage> {
   @override
   Widget build(BuildContext context) {
     final ready = !_busy && !_recording && _trackPath != null;
+    final scoreOnly = _score != null &&
+        (_forceScoreFullScreen ||
+            (MediaQuery.orientationOf(context) == Orientation.landscape
+              && _playing));
+    if (scoreOnly != _immersive) {
+      _immersive = scoreOnly;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await SystemChrome.setEnabledSystemUIMode(scoreOnly
+            ? SystemUiMode.immersiveSticky
+            : SystemUiMode.edgeToEdge);
+      });
+    }
+    if (scoreOnly) {
+      return Scaffold(
+        backgroundColor: _paperTone == PaperTone.sepia
+            ? const Color(0xFFF2E5CA) : const Color(0xFFFAFAF8),
+        body: SafeArea(
+          child: Stack(children: [
+            Positioned.fill(
+              child: StudioScore(
+                project: _score!,
+                positionSeconds: _cursor.inMicroseconds / 1000000.0,
+                tone: _paperTone,
+                activeNoteId: _selectedNoteId,
+                fullScreen: true,
+                onFullScreen: () => setState(() =>
+                    _forceScoreFullScreen = false),
+                onTapNote: (note) => unawaited(_jumpToNote(note)),
+              ),
+            ),
+            Positioned(
+              top: 8, right: 8,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xEE1B2B30),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: _playing ? 'Pausa' : 'Riprendi',
+                    color: Colors.white,
+                    onPressed: _playing ? _pauseTransport :
+                        () => _togglePlaybackMode(
+                          _midiReady ? _PlaybackMode.both :
+                          _PlaybackMode.original),
+                    icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                  ),
+                  IconButton(
+                    tooltip: 'Esci dallo schermo intero',
+                    color: Colors.white,
+                    onPressed: () {
+                      unawaited(_pauseTransport());
+                      setState(() => _forceScoreFullScreen = false);
+                    },
+                    icon: const Icon(Icons.fullscreen_exit),
+                  ),
+                ]),
+              ),
+            ),
+          ]),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF101820),
@@ -926,27 +990,16 @@ class _StudioPageState extends State<StudioPage> {
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20)),
         ]),
         actions: [
-          PopupMenuButton<bool>(
-            tooltip: 'Modalità di analisi',
-            icon: const Icon(Icons.tune),
-            onSelected: (mode) {
-              if (_busy || _recording) return;
-              setState(() => _multitrackMode = mode);
-              if (_trackPath != null) unawaited(_analyse());
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: true, child: Text('Analisi multitraccia')),
-              PopupMenuItem(
-                value: false, child: Text('Analisi melodia')),
-            ],
+          IconButton(
+            icon: const Icon(Icons.system_update_alt),
+            tooltip: 'Aggiornamenti',
+            onPressed: _busy ? null : _checkForUpdates,
           ),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _pageIndex,
-        onDestinationSelected: (value) =>
-            setState(() => _pageIndex = value),
+        onDestinationSelected: (value) => setState(() => _pageIndex = value),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.library_music_outlined),
               selectedIcon: Icon(Icons.library_music), label: 'Studio'),
@@ -954,31 +1007,30 @@ class _StudioPageState extends State<StudioPage> {
               selectedIcon: Icon(Icons.edit_note), label: 'NoteLab'),
           NavigationDestination(icon: Icon(Icons.tune_outlined),
               selectedIcon: Icon(Icons.tune), label: 'Tracce'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings), label: 'Opzioni'),
         ],
       ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
           children: [
-            _importToolbar(),
+            if (_pageIndex == 0) _importToolbar(),
             if (_busy) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               const LinearProgressIndicator(minHeight: 3),
             ],
-            if (!_busy && _trackPath != null) ...[
+            if (!_busy && _trackPath != null && _pageIndex == 0) ...[
               const SizedBox(height: 8),
-              Text(
-                _status,
-                style: const TextStyle(
-                    fontSize: 12, color: Color(0xFFA2B6C1)),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+              Text(_status,
+                style: const TextStyle(fontSize: 12, color: Color(0xFFA2B6C1)),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
             ],
-            const SizedBox(height: 18),
+            const SizedBox(height: 12),
             if (_pageIndex == 0) _studioView(ready),
             if (_pageIndex == 1) _noteLabView(),
             if (_pageIndex == 2) _tracksView(),
+            if (_pageIndex == 3) _settingsView(),
           ],
         ),
       ),
@@ -1000,32 +1052,7 @@ class _StudioPageState extends State<StudioPage> {
             icon: Icon(_recording ? Icons.stop_circle : Icons.mic),
             label: Text(_recording ? 'Stop' : 'Registra'),
           ),
-          PopupMenuButton<String>(
-            tooltip: 'Demo',
-            enabled: !_busy && !_recording,
-            onSelected: (value) {
-              if (value == 'ensemble') {
-                unawaited(_multiDemo());
-              } else {
-                unawaited(_demo());
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'ensemble',
-                  child: Text('Demo multistrumento')),
-              PopupMenuItem(value: 'melody',
-                  child: Text('Demo melodia')),
-            ],
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.music_note_outlined),
-                SizedBox(width: 6),
-                Text('Demo'),
-                Icon(Icons.arrow_drop_down),
-              ]),
-            ),
-          ),
+
         ]),
         if (_trackPath != null) ...[
           const SizedBox(height: 9),
@@ -1079,14 +1106,9 @@ class _StudioPageState extends State<StudioPage> {
             positionSeconds: _cursor.inMicroseconds / 1000000.0,
             tone: _paperTone,
             activeNoteId: _selectedNoteId,
-            onTapNote: (note) {
-              _selectFamily(note.family);
-              setState(() => _selectedNoteId = note.id);
-              final index = _notes.indexWhere((item) =>
-                  item.midi == note.midi &&
-                  (item.startSeconds - score.timeOf(note)).abs() < 0.25);
-              if (index >= 0) unawaited(_playOneNote(index));
-            },
+            onFullScreen: () =>
+                setState(() => _forceScoreFullScreen = true),
+            onTapNote: (note) => unawaited(_jumpToNote(note)),
           ),
           const SizedBox(height: 12),
           Row(children: [
@@ -1174,16 +1196,14 @@ class _StudioPageState extends State<StudioPage> {
               onPressed: _analyse,
               child: const Text('Rianalizza'),
             ),
-        ]),
-        if (score != null)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Text(
-              'Trascrizione sperimentale · analisi dei primi 40 s.',
-              style: TextStyle(fontSize: 11,
-                  color: Color(0xFF93A4B1)),
+          if (score != null)
+            OutlinedButton.icon(
+              icon: const Icon(Icons.travel_explore),
+              onPressed: _searching ? null : _openSongSearch,
+              label: const Text('Confronta online'),
             ),
-          ),
+        ]),
+
       ],
     );
   }
@@ -1203,50 +1223,76 @@ class _StudioPageState extends State<StudioPage> {
 
   Widget _noteLabView() {
     final score = _score;
-    if (score == null) {
-      return const Center(child: Padding(
+    if (score == null) return const Center(
+      child: Padding(
         padding: EdgeInsets.all(20),
-        child: Text('Importa un brano per usare NoteLab.'),
-      ));
-    }
-    return _section(
-      icon: Icons.edit_note,
-      title: 'NoteLab',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Tempo · ${_tempoSlider.round()} BPM'),
-          Slider(
-            value: _tempoSlider, min: 50, max: 220, divisions: 170,
-            label: '${_tempoSlider.round()}',
-            onChanged: _busy ? null : (v) =>
-                setState(() => _tempoSlider = v),
-          ),
-          Wrap(spacing: 8, runSpacing: 8, children: [
-            FilledButton.tonalIcon(
-              onPressed: _busy ? null : _retranscribeAtBpm,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Ritrascrivi'),
-            ),
-            FilledButton.tonalIcon(
-              onPressed: _busy ? null : _rebuildMidiFromScore,
-              icon: const Icon(Icons.piano),
-              label: const Text('Aggiorna MIDI'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-          NoteLab(
-            score: score,
-            selectedFamily: _selectedFamily,
-            selectedNoteId: _selectedNoteId,
-            onSelect: (note) => setState(() {
-              _selectedNoteId = note.id;
-              _selectedFamily = note.family;
-            }),
-            onChanged: _onScoreEdit,
-          ),
-        ],
+        child: Text('Apri un brano per usare NoteLab.'),
       ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Expanded(child: Text('NoteLab',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+          Text('${_tempoSlider.round()} BPM'),
+          IconButton(
+            tooltip: 'Schermo intero',
+            onPressed: () => setState(() => _forceScoreFullScreen = true),
+            icon: const Icon(Icons.fullscreen),
+          ),
+        ]),
+        StudioScore(
+          project: score,
+          positionSeconds: _cursor.inMicroseconds / 1000000,
+          tone: _paperTone,
+          activeNoteId: _selectedNoteId,
+          onFullScreen: () => setState(() => _forceScoreFullScreen = true),
+          onTapNote: (note) {
+            _selectFamily(note.family);
+            setState(() => _selectedNoteId = note.id);
+          },
+        ),
+        const SizedBox(height: 14),
+        _section(
+          icon: Icons.edit_note,
+          title: 'Modifica nota',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              NoteLab(
+                score: score,
+                selectedFamily: _selectedFamily,
+                selectedNoteId: _selectedNoteId,
+                onSelect: (note) => setState(() {
+                  _selectedNoteId = note.id;
+                  _selectedFamily = note.family;
+                }),
+                onChanged: _onScoreEdit,
+              ),
+              const SizedBox(height: 12),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                FilledButton.tonalIcon(
+                  onPressed: _busy ? null : _rebuildMidiFromScore,
+                  icon: const Icon(Icons.piano),
+                  label: const Text('Aggiorna MIDI'),
+                ),
+                FilledButton.tonalIcon(
+                  onPressed: _busy ? null : _retranscribeAtBpm,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Ritrascrivi'),
+                ),
+              ]),
+              Slider(
+                value: _tempoSlider, min: 50, max: 220, divisions: 170,
+                label: '${_tempoSlider.round()} BPM',
+                onChanged: _busy ? null :
+                    (v) => setState(() => _tempoSlider = v),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -1334,6 +1380,131 @@ class _StudioPageState extends State<StudioPage> {
       ],
     );
   }
+
+  Future<void> _openSongSearch() async {
+    final input = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cerca partitura online'),
+        content: TextField(
+          controller: _songQuery,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Titolo o artista', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annulla')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _songQuery.text.trim()),
+            child: const Text('Cerca')),
+        ],
+      ),
+    );
+    if (input == null || input.length < 4 || !mounted) return;
+    _songQuery.text = input;
+    await _findSongOnline();
+  }
+
+  Widget _settingsView() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _section(
+        icon: Icons.tune,
+        title: 'Visualizzazione',
+        child: Column(children: [
+          SegmentedButton<PaperTone>(
+            segments: const [
+              ButtonSegment(value: PaperTone.ivory, label: Text('Bianco')),
+              ButtonSegment(value: PaperTone.sepia, label: Text('Seppia')),
+            ],
+            selected: {_paperTone},
+            onSelectionChanged: (set) =>
+                setState(() => _paperTone = set.first),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Multitraccia'),
+            value: _multitrackMode,
+            onChanged: _busy ? null : (value) {
+              setState(() => _multitrackMode = value);
+              if (_trackPath != null) unawaited(_analyse());
+            },
+          ),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.av_timer,
+        title: 'Metronomo',
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _metronomeEnabled,
+            title: const Text('Attivo durante la riproduzione'),
+            onChanged: _busy ? null :
+                (value) => unawaited(
+                    _configureMetronome(enabled: value)),
+          ),
+          Text('Tempo: $_metronomeBpm BPM'),
+          Slider(
+            min: 40, max: 240, divisions: 200,
+            value: _metronomeBpm.toDouble(),
+            label: '$_metronomeBpm BPM',
+            onChanged: _busy ? null :
+                (v) => setState(() => _metronomeBpm = v.round()),
+            onChangeEnd: _busy ? null :
+                (v) => unawaited(
+                  _configureMetronome(bpm: v.round())),
+          ),
+          Wrap(spacing: 8, children: [
+            for (final subdivision in [1, 2, 4, 8])
+              ChoiceChip(
+                selected: _metronomeSubdivisions == subdivision,
+                label: Text(switch (subdivision) {
+                  1 => '1/4', 2 => '1/8', 4 => '1/16', _ => '1/32'
+                }),
+                onSelected: _busy ? null : (_) => unawaited(
+                  _configureMetronome(subdivisions: subdivision)),
+              ),
+          ]),
+          const Text('Volume'),
+          Slider(
+            value: _metronomeVolume,
+            onChanged: (value) {
+              setState(() => _metronomeVolume = value);
+              unawaited(_metronomePlayer.setVolume(value));
+            },
+          ),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.music_note,
+        title: 'Esempi',
+        child: Wrap(spacing: 8, runSpacing: 8, children: [
+          OutlinedButton(
+            onPressed: _busy ? null : _multiDemo,
+            child: const Text('Demo multitraccia')),
+          OutlinedButton(
+            onPressed: _busy ? null : _demo,
+            child: const Text('Demo melodia')),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.system_update_alt,
+        title: 'Aggiornamenti',
+        child: FilledButton.tonalIcon(
+          onPressed: _busy ? null : _checkForUpdates,
+          icon: const Icon(Icons.update),
+          label: const Text('Controlla su GitHub'),
+        ),
+      ),
+    ],
+  );
+
 
   Widget _section({
     required IconData icon,
