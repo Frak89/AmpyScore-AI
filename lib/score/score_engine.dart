@@ -57,16 +57,23 @@ class ScoreProject {
     required this.bpm,
     required this.parts,
     required this.notes,
+    this.beatsPerBar = 4,
+    this.minimumDurationSeconds = 0,
   });
   int bpm;
+  int beatsPerBar;
+  final double minimumDurationSeconds;
+  int get barTicks => ticksPerQuarter * beatsPerBar;
   final List<InstrumentPart> parts;
   final List<ScoreNote> notes;
   int _nextId = 0;
 
   factory ScoreProject.fromTranscription(
-      List<InstrumentPart> parts, int bpm) {
+      List<InstrumentPart> parts, int bpm,
+      {int beatsPerBar = 4, double minimumDurationSeconds = 0}) {
     final project = ScoreProject(bpm: bpm.clamp(40, 240),
-        parts: parts, notes: []);
+        parts: parts, notes: [], beatsPerBar: beatsPerBar,
+        minimumDurationSeconds: minimumDurationSeconds);
     final ticksPerSecond = project.bpm * ticksPerQuarter / 60.0;
     for (final part in parts) {
       ScoreNote? last;
@@ -99,7 +106,8 @@ class ScoreProject {
 
   int get barCount {
     final maxEnd = notes.fold<int>(0, (v, note) => math.max(v, note.end));
-    return math.max(1, (maxEnd / ticksPerBar).ceil());
+    final durationTicks = (minimumDurationSeconds * bpm * ticksPerQuarter / 60).ceil();
+    return math.max(1, (math.max(maxEnd, durationTicks) / barTicks).ceil());
   }
 
   int? activeNoteId(InstrumentFamily family, double time) {
@@ -156,8 +164,8 @@ class ScoreProject {
   /// treated as independent polyphonic voices in this early score editor.
   /// Overlap produces a red bar, rather than silently hiding the problem.
   bool hasOverflow(InstrumentFamily family, int bar) {
-    final begin = bar * ticksPerBar;
-    final end = begin + ticksPerBar;
+    final begin = bar * barTicks;
+    final end = begin + barTicks;
     var total = 0;
     for (final note in forFamily(family)) {
       total += math.max(0, math.min(note.end, end) -
@@ -168,10 +176,15 @@ class ScoreProject {
 
   List<ScoreMeasure> measures(InstrumentFamily family) {
     final lane = forFamily(family);
+    return measuresRange(family, 0, barCount);
+  }
+
+  List<ScoreMeasure> measuresRange(InstrumentFamily family, int first, int last) {
+    final lane = forFamily(family);
     final out = <ScoreMeasure>[];
-    for (var bar = 0; bar < barCount; bar++) {
-      final start = bar * ticksPerBar;
-      final end = start + ticksPerBar;
+    for (var bar = first.clamp(0, barCount); bar < last && bar < barCount; bar++) {
+      final start = bar * barTicks;
+      final end = start + barTicks;
       var cursor = start;
       final cells = <ScoreCell>[];
       for (final note in lane) {
@@ -196,13 +209,13 @@ class ScoreProject {
     return out;
   }
 
-  static List<ScoreCell> _split(int start, int end, ScoreNote? note,
+  List<ScoreCell> _split(int start, int end, ScoreNote? note,
       {bool continuesFrom = false, bool continuesTo = false}) {
     final cells = <ScoreCell>[];
     var at = start;
     const values = [32, 24, 16, 12, 8, 6, 4, 3, 2, 1];
     while (at < end) {
-      final barEnd = (at ~/ ticksPerBar + 1) * ticksPerBar;
+      final barEnd = (at ~/ barTicks + 1) * barTicks;
       final remaining = math.min(end, barEnd) - at;
       final units = values.firstWhere((v) => v <= remaining);
       cells.add(ScoreCell(
@@ -273,7 +286,7 @@ class MusicXmlWriter {
           final percussion = part.percussion;
           out.writeln('<attributes><divisions>480</divisions>'
               '<key><fifths>0</fifths></key>'
-              '<time><beats>4</beats><beat-type>4</beat-type></time>'
+              '<time><beats>${score.beatsPerBar}</beats><beat-type>4</beat-type></time>'
               '<clef><sign>${percussion ? "percussion" : bass ? "F" : "G"}</sign>'
               '${percussion ? "" : "<line>${bass ? 4 : 2}</line>"}'
               '</clef></attributes>');
