@@ -1865,7 +1865,7 @@ class _StudioPageState extends State<StudioPage> {
       children: [
         const Text('Ascolta e trascrivi',
           style: TextStyle(fontSize: 25,
-              fontWeight: FontWeight.w750)),
+              fontWeight: FontWeight.w700)),
         const SizedBox(height: 6),
         Text(
           live ? 'Trascrizione progressiva dal microfono'
@@ -1909,7 +1909,7 @@ class _StudioPageState extends State<StudioPage> {
                 Text(_clock(duration), style:
                   const TextStyle(fontSize: 26,
                     fontWeight: FontWeight.bold,
-                    fontFeatures: [FontFeature.tabularFigures()])),
+                    letterSpacing: 0.4)),
                 const SizedBox(height: 5),
                 Text('Note rilevate: ${_liveAccumulator.noteCount}',
                   style: const TextStyle(color: Color(0xFF94D9C4))),
