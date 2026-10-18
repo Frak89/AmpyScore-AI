@@ -33,7 +33,7 @@ class ScorePdf {
           child: pw.Column(
             crossAxisAlignment: pw.CrossAxisAlignment.start,
             children: [
-              pw.Text('Battute ${firstBar + 1}–$lastBar',
+              pw.Text('Battute ${firstBar + 1}-$lastBar',
                 style: pw.TextStyle(fontSize: 8, color: ink)),
               pw.SizedBox(height: 3),
               for (final part in score.parts)
