@@ -1,8 +1,9 @@
 import 'dart:math' as math;
 import '../audio/multitrack_engine.dart';
 
-const int ticksPerBar = 16;
-const int midiTicksPerSixteenth = 120;
+const int ticksPerBar = 32; // 4/4 = 32 thirty-second units.
+const int ticksPerQuarter = 8;
+const int midiTicksPerThirtySecond = 60;
 
 /// Native editor state: each event is an independently editable single note.
 /// Rests are calculated from unoccupied time on each staff.
@@ -14,6 +15,7 @@ class ScoreNote {
     required this.start,
     required this.length,
     required this.evidence,
+    this.isRest = false,
   });
   final int id;
   final InstrumentFamily family;
@@ -21,9 +23,10 @@ class ScoreNote {
   int start;
   int length;
   final double evidence;
+  bool isRest;
   int get end => start + length;
   ScoreNote copy() => ScoreNote(id: id, family: family, midi: midi,
-      start: start, length: length, evidence: evidence);
+      start: start, length: length, evidence: evidence, isRest: isRest);
 }
 
 class ScoreCell {
@@ -39,7 +42,7 @@ class ScoreCell {
   final ScoreNote? note;
   final bool tieStart; // Continue to next cell.
   final bool tieStop; // Continued from previous cell.
-  bool get isRest => note == null;
+  bool get isRest => note == null || note!.isRest;
 }
 
 class ScoreMeasure {
@@ -64,7 +67,7 @@ class ScoreProject {
       List<InstrumentPart> parts, int bpm) {
     final project = ScoreProject(bpm: bpm.clamp(40, 240),
         parts: parts, notes: []);
-    final ticksPerSecond = project.bpm * 4 / 60.0;
+    final ticksPerSecond = project.bpm * ticksPerQuarter / 60.0;
     for (final part in parts) {
       ScoreNote? last;
       final ordered = part.notes.toList()
@@ -92,7 +95,7 @@ class ScoreProject {
       notes.where((n) => n.family == family).toList()
         ..sort((a, b) => a.start.compareTo(b.start));
 
-  double get durationSeconds => (barCount * ticksPerBar) * 60 / (bpm * 4);
+  double get durationSeconds => (barCount * ticksPerBar) * 60 / (bpm * ticksPerQuarter);
 
   int get barCount {
     final maxEnd = notes.fold<int>(0, (v, note) => math.max(v, note.end));
@@ -100,14 +103,14 @@ class ScoreProject {
   }
 
   int? activeNoteId(InstrumentFamily family, double time) {
-    final tick = (time * bpm * 4 / 60).floor();
+    final tick = (time * bpm * ticksPerQuarter / 60).floor();
     for (final note in forFamily(family)) {
       if (tick >= note.start && tick < note.end) return note.id;
     }
     return null;
   }
 
-  double timeOf(ScoreNote note) => note.start * 60 / (bpm * 4);
+  double timeOf(ScoreNote note) => note.start * 60 / (bpm * ticksPerQuarter);
 
   void addNote(InstrumentFamily family, {int? afterId}) {
     final lane = forFamily(family);
@@ -119,9 +122,28 @@ class ScoreProject {
       id: _nextId++, family: family,
       midi: after?.midi ?? 60,
       start: pos,
-      length: 4,
+      length: ticksPerQuarter,
       evidence: 0,
     ));
+  }
+
+  /// First delete turns a note into an explicit rest; second delete
+  /// closes the gap and removes it. Notated implicit rests are regenerated
+  /// automatically as required by 4/4 for any remaining silence.
+  bool deleteOrRest(int id) {
+    final item = notes.where((n) => n.id == id).firstOrNull;
+    if (item == null) return false;
+    if (!item.isRest) {
+      item.isRest = true;
+      return true;
+    }
+    for (final other in notes) {
+      if (other.family == item.family && other.id != id &&
+          other.start >= item.end) {
+        other.start = math.max(0, other.start - item.length);
+      }
+    }
+    return removeNote(id);
   }
 
   bool removeNote(int id) {
@@ -178,7 +200,7 @@ class ScoreProject {
       {bool continuesFrom = false, bool continuesTo = false}) {
     final cells = <ScoreCell>[];
     var at = start;
-    const values = [16, 12, 8, 6, 4, 3, 2, 1];
+    const values = [32, 24, 16, 12, 8, 6, 4, 3, 2, 1];
     while (at < end) {
       final barEnd = (at ~/ ticksPerBar + 1) * ticksPerBar;
       final remaining = math.min(end, barEnd) - at;
@@ -187,8 +209,8 @@ class ScoreProject {
         start: at,
         length: units,
         note: note,
-        tieStop: note != null && (continuesFrom || at != start),
-        tieStart: note != null &&
+        tieStop: note != null && !note.isRest && (continuesFrom || at != start),
+        tieStart: note != null && !note.isRest &&
             (continuesTo || at + units != end),
       ));
       at += units;
@@ -200,6 +222,7 @@ class ScoreProject {
   /// accuracy against ground-truth notation. Never label it verified.
   int estimatedReliability(InstrumentFamily family) {
     final lane = forFamily(family);
+    lane.removeWhere((n) => n.isRest);
     if (lane.isEmpty) return 0;
     final source = parts.where((p) => p.family == family).firstOrNull;
     final sourceStrength = source?.confidence ?? 0.4;
@@ -260,7 +283,8 @@ class MusicXmlWriter {
               '</direction-type><sound tempo="${score.bpm}"/>'
               '</direction>');
         }
-        for (final cell in bar.cells) {
+        for (var i = 0; i < bar.cells.length; i++) {
+          final cell = bar.cells[i];
           out.write('<note>');
           if (cell.isRest) {
             out.write('<rest/>');
@@ -273,9 +297,15 @@ class MusicXmlWriter {
               out.write('<pitch>${pitch.$1}${pitch.$2}</pitch>');
             }
           }
-          out.write('<duration>${cell.length * midiTicksPerSixteenth}'
+          out.write('<duration>${cell.length * midiTicksPerThirtySecond}'
               '</duration><type>${_type(cell.length)}</type>');
-          if ([3, 6, 12].contains(cell.length)) out.write('<dot/>');
+          if ([3, 6, 12, 24].contains(cell.length)) out.write('<dot/>');
+          if (!cell.isRest) {
+            final beam = _beam(bar.cells, i, 4);
+            if (beam != null) out.write('<beam number="1">$beam</beam>');
+            final second = _beam(bar.cells, i, 2);
+            if (second != null) out.write('<beam number="2">$second</beam>');
+          }
           if (cell.tieStop) out.write('<tie type="stop"/>');
           if (cell.tieStart) out.write('<tie type="start"/>');
           if (cell.tieStop || cell.tieStart) {
@@ -294,12 +324,28 @@ class MusicXmlWriter {
     return out.toString();
   }
 
+  static String? _beam(List<ScoreCell> cells, int i, int maximum) {
+    final current = cells[i];
+    if (current.isRest || current.length > maximum ||
+        current.tieStart || current.tieStop) return null;
+    bool joins(ScoreCell a, ScoreCell b) =>
+        !a.isRest && !b.isRest && a.length <= maximum &&
+        b.length <= maximum && !a.tieStart && !b.tieStop &&
+        a.start + a.length == b.start &&
+        a.start ~/ ticksPerQuarter == b.start ~/ ticksPerQuarter;
+    final previous = i > 0 && joins(cells[i - 1], current);
+    final next = i + 1 < cells.length && joins(current, cells[i + 1]);
+    if (!previous && !next) return null;
+    return previous ? (next ? 'continue' : 'end') : 'begin';
+  }
+
   static String _type(int n) => switch (n) {
-    16 => 'whole',
-    12 || 8 => 'half',
-    6 || 4 => 'quarter',
-    3 || 2 => 'eighth',
-    _ => '16th',
+    32 => 'whole',
+    24 || 16 => 'half',
+    12 || 8 => 'quarter',
+    6 || 4 => 'eighth',
+    3 || 2 => '16th',
+    _ => '32nd',
   };
 
   static (String, String) _pitch(int midi) {
