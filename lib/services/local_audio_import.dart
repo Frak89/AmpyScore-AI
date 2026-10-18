@@ -36,7 +36,7 @@ class LocalAudioImport {
     if (!isSupported(selected.name)) {
       throw const FormatException('Formato audio non riconosciuto.');
     }
-    if (selected.size > maxInputBytes) {
+    if ((selected.lengthSync() ?? await selected.length() ?? 0) > maxInputBytes) {
       throw const FormatException('File oltre 96 MB: scegli un brano più corto.');
     }
 
@@ -106,7 +106,6 @@ class LocalAudioImport {
     final selected = await FilePicker.pickFile(
       type: FileType.custom,
       allowedExtensions: acceptedExtensions,
-      withData: false,
     );
     if (selected == null) return null;
     return import(selected);
