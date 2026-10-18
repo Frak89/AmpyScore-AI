@@ -8,9 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
 import 'audio/midi_engine.dart';
+import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
@@ -21,6 +24,8 @@ import 'score/note_lab.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 import 'services/local_audio_import.dart';
+import 'services/app_updates.dart';
+import 'services/song_lookup.dart';
 
 void main() => runApp(const AmpyScoreApp());
 
@@ -70,7 +75,9 @@ class _StudioPageState extends State<StudioPage> {
   final _midiPlayer = AudioPlayer(); // Synthesized preview WAV.
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
   final _stemPlayer = AudioPlayer(); // Optional spectral focus WAV.
+  final _metronomePlayer = AudioPlayer();
   final _apiKey = TextEditingController();
+  final _songQuery = TextEditingController();
   Timer? _transportTimer;
 
   List<DetectedNote> _notes = const [];
@@ -97,6 +104,15 @@ class _StudioPageState extends State<StudioPage> {
   String _trackName = 'Nessuna traccia';
   String _status = 'Importa una canzone o registra una melodia.';
   String? _assistantAnswer;
+  bool _metronomeEnabled = false;
+  bool _metronomeReady = false;
+  int _metronomeBpm = 120;
+  int _metronomeSubdivisions = 1;
+  double _metronomeVolume = .56;
+  bool _forceScoreFullScreen = false;
+  bool _immersive = false;
+  bool _searching = false;
+  List<SongCandidate> _songResults = const [];
   bool _recording = false;
   bool _busy = false;
   bool _playing = false;
@@ -124,11 +140,16 @@ class _StudioPageState extends State<StudioPage> {
   void dispose() {
     _transportTimer?.cancel();
     _apiKey.dispose();
+    _songQuery.dispose();
+    if (_immersive) {
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    }
     _recorder.dispose();
     _player.dispose();
     _midiPlayer.dispose();
     _notePlayer.dispose();
     _stemPlayer.dispose();
+    _metronomePlayer.dispose();
     super.dispose();
   }
 
@@ -155,6 +176,8 @@ class _StudioPageState extends State<StudioPage> {
     await _midiPlayer.stop();
     await _notePlayer.stop();
     await _stemPlayer.stop();
+    await _metronomePlayer.stop();
+    _metronomeReady = false;
     try {
       await _player.setFilePath(path);
     } catch (_) {
@@ -168,6 +191,8 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _songQuery.text = SongLookup.filenameTitle(name) ?? '';
+      _songResults = const [];
       _notes = const [];
       _parts = const [];
       _rhythm = null;
@@ -343,6 +368,8 @@ class _StudioPageState extends State<StudioPage> {
     ];
     final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
     final project = ScoreProject.fromTranscription(parts, bpm);
+    _metronomeBpm = project.bpm;
+    _metronomeReady = false;
     if (mounted) {
       setState(() {
         _score = project;
@@ -360,11 +387,11 @@ class _StudioPageState extends State<StudioPage> {
     setState(() {
       _notes = [
         for (final item in lane)
-          DetectedNote(
+          if (!item.isRest) DetectedNote(
             midi: item.midi,
             startSeconds: project.timeOf(item),
             endSeconds: project.timeOf(item) +
-                item.length * 60 / (project.bpm * 4),
+                item.length * 60 / (project.bpm * ticksPerQuarter),
             confidence: item.evidence,
           ),
       ];
@@ -381,11 +408,11 @@ class _StudioPageState extends State<StudioPage> {
           confidence: part.confidence,
           notes: [
             for (final item in score.forFamily(part.family))
-              DetectedNote(
+              if (!item.isRest) DetectedNote(
                 midi: item.midi,
                 startSeconds: score.timeOf(item),
                 endSeconds: score.timeOf(item) +
-                    item.length * 60 / (score.bpm * 4),
+                    item.length * 60 / (score.bpm * ticksPerQuarter),
                 confidence: item.evidence,
               ),
           ],
@@ -497,6 +524,142 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  Future<void> _prepareMetronome() async {
+    if (!_metronomeEnabled || _trackPath == null) return;
+    await _metronomePlayer.stop();
+    final settings = MetronomeSettings(
+      bpm: _metronomeBpm,
+      subdivisions: _metronomeSubdivisions,
+      durationSeconds: _durationSeconds + .3,
+    );
+    final bytes = await compute(MetronomeSynth.render, settings);
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/metro_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    await file.writeAsBytes(bytes, flush: true);
+    await _metronomePlayer.setFilePath(file.path);
+    await _metronomePlayer.setVolume(_metronomeVolume);
+    _metronomeReady = true;
+  }
+
+  Future<void> _configureMetronome({
+    bool? enabled,
+    int? bpm,
+    int? subdivisions,
+  }) async {
+    if (_busy) return;
+    final previousMode = _playing ? _mode : null;
+    final oldPosition = _cursor;
+    if (previousMode != null) await _pauseTransport();
+    if (mounted) {
+      setState(() {
+        if (enabled != null) _metronomeEnabled = enabled;
+        if (bpm != null) _metronomeBpm = bpm;
+        if (subdivisions != null) _metronomeSubdivisions = subdivisions;
+        _metronomeReady = false;
+      });
+    }
+    if (_metronomeEnabled && _trackPath != null) {
+      await _prepareMetronome();
+      await _metronomePlayer.seek(oldPosition);
+    } else {
+      await _metronomePlayer.pause();
+    }
+    if (previousMode != null) {
+      await _togglePlaybackMode(previousMode);
+    }
+  }
+
+  Future<void> _jumpToNote(ScoreNote note) async {
+    if (_busy || _trackPath == null) return;
+    final mode = _mode ??
+        (_midiReady ? _PlaybackMode.both : _PlaybackMode.original);
+    await _pauseTransport();
+    if (mounted) setState(() {
+      _selectedNoteId = note.id;
+      _selectedFamily = note.family;
+    });
+    await _seekTransport(Duration(
+      microseconds: (_score!.timeOf(note) * 1000000).round(),
+    ));
+    await _togglePlaybackMode(mode);
+  }
+
+  Future<void> _checkForUpdates() => _execute(() async {
+    final update = await AppUpdates.check();
+    if (!mounted) return;
+    final target = update?.url ?? AppUpdates.releases;
+    final title = update == null
+        ? 'Nessuna release pubblicata'
+        : update.hasNewVersion
+            ? 'Disponibile ${update.version}'
+            : 'Versione aggiornata';
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(update == null
+          ? 'Puoi verificare le release GitHub.'
+          : 'Le nuove versioni si installano dal browser. '
+            'Per aggiornare mantenendo i dati serve la stessa firma APK.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false),
+              child: const Text('Chiudi')),
+          FilledButton(onPressed: () => Navigator.pop(context, true),
+              child: const Text('Apri GitHub')),
+        ],
+      ),
+    );
+    if (open == true) await AppUpdates.openReleases(url: target);
+  });
+
+  Future<void> _findSongOnline() async {
+    if (_searching) return;
+    setState(() => _searching = true);
+    try {
+      final candidates = await SongLookup.find(
+        '${_songQuery.text.trim()}.mp3');
+      if (!mounted) return;
+      setState(() => _songResults = candidates);
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('Corrispondenze per titolo'),
+          content: SizedBox(
+            width: 460,
+            child: candidates.isEmpty
+              ? const Text('Nessuna corrispondenza trovata.')
+              : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final song in candidates)
+                    ListTile(
+                      title: Text(song.title),
+                      subtitle: Text(song.artist),
+                      trailing: const Icon(Icons.open_in_new),
+                      onTap: () => launchUrl(song.url,
+                          mode: LaunchMode.externalApplication),
+                    ),
+                ],
+              ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context),
+                child: const Text('Chiudi')),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ricerca: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
   Future<void> _analyse() => _execute(() async {
     await _analyseInternal();
     _buildScoreAfterAnalysis();
@@ -529,6 +692,7 @@ class _StudioPageState extends State<StudioPage> {
       });
       unawaited(_midiPlayer.pause());
       unawaited(_player.pause());
+      unawaited(_metronomePlayer.pause());
       return;
     }
 
@@ -543,6 +707,12 @@ class _StudioPageState extends State<StudioPage> {
         unawaited(_midiPlayer.seek(time).whenComplete(() {
           _resyncing = false;
         }));
+      }
+    }
+    if (_metronomeEnabled && _metronomeReady) {
+      final drift = (time - _metronomePlayer.position).inMilliseconds.abs();
+      if (drift > 140 && !_resyncing) {
+        unawaited(_metronomePlayer.seek(time));
       }
     }
     final index = _noteAt(time.inMicroseconds / 1000000.0);
@@ -562,7 +732,7 @@ class _StudioPageState extends State<StudioPage> {
         _mode = null;
       });
     }
-    await Future.wait([_player.pause(), _midiPlayer.pause()]);
+    await Future.wait([_player.pause(), _midiPlayer.pause(), _metronomePlayer.pause()]);
   }
 
   Future<void> _seekTransport(Duration cursor) async {
@@ -576,8 +746,9 @@ class _StudioPageState extends State<StudioPage> {
     }
     try {
       await _player.seek(newTime);
-      if (_midiReady) {
-        await _midiPlayer.seek(newTime);
+      if (_midiReady) await _midiPlayer.seek(newTime);
+      if (_metronomeEnabled && _metronomeReady) {
+        await _metronomePlayer.seek(newTime);
       }
     } catch (error) {
       if (mounted) setState(() => _status = 'Posizionamento: $error');
@@ -594,6 +765,9 @@ class _StudioPageState extends State<StudioPage> {
       }
       await _pauseTransport();
       await _notePlayer.stop();
+      if (_metronomeEnabled && !_metronomeReady) {
+        await _prepareMetronome();
+      }
       var newTime = _cursor;
       if (newTime.inMilliseconds >= (_durationSeconds * 1000).floor() - 80) {
         newTime = Duration.zero;
@@ -609,6 +783,9 @@ class _StudioPageState extends State<StudioPage> {
       }
       if (requested != _PlaybackMode.original) {
         unawaited(_midiPlayer.play());
+      }
+      if (_metronomeEnabled && _metronomeReady) {
+        unawaited(_metronomePlayer.play());
       }
     } catch (error) {
       if (mounted) setState(() {
