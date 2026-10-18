@@ -22,14 +22,24 @@ class BandFocusRenderer {
       const chunkSeconds = 3.0;
       for (var start = 0.0; start < reader.durationSeconds; start += chunkSeconds) {
         final dur = math.min(chunkSeconds, reader.durationSeconds - start);
-        final data = await reader.window(start, dur);
+        // Use a short look-behind/look-ahead for the IIR band filters,
+        // then trim it so there is no artificial reset click every 3s.
+        const padding = .2;
+        final from = math.max(0.0, start - padding);
+        final until = math.min(reader.durationSeconds,
+            start + dur + padding);
+        final data = await reader.window(from, until - from);
         if (data.isEmpty) break;
         final wave = await compute(
           StemExtractor.focus, StemRequest(data, stem));
         final view = ByteData.sublistView(wave);
         sampleRate = view.getUint32(24, Endian.little);
-        await writer.writeFrom(wave, 44);
-        bytesWritten += wave.length - 44;
+        final skip = ((start - from) * sampleRate).round();
+        final length = (dur * sampleRate).round();
+        final first = math.min(wave.length, 44 + skip * 2);
+        final last = math.min(wave.length, first + length * 2);
+        await writer.writeFrom(wave, first, last);
+        bytesWritten += last - first;
         progress?.call(math.min(1.0, (start + dur) / reader.durationSeconds));
       }
       if (sampleRate == 0) throw const FormatException('WAV non disponibile');
