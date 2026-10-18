@@ -1,7 +1,7 @@
 name: ampy_score_ai
 description: "AmpyScore AI: listen live or import music and generate editable multi-staff scores offline."
 publish_to: none
-version: 1.1.0+11
+version: 1.2.0+12
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -15,6 +15,7 @@ dependencies:
   audio_decoder: ^0.8.1
   flutter_midi_pro: ^4.0.4
   xml: ^7.0.1
+  archive: ^4.4.0
   url_launcher: ^6.3.3
   package_info_plus: ^10.2.2
   path_provider: ^2.1.6

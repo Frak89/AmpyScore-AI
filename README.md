@@ -1,5 +1,12 @@
 # AmpyScore AI 1.1 — ascolta musica, riconosci le parti, leggi gli spartiti
 
+## Partiture e audio di ogni strumento
+
+[Guida completa al percorso AI e all'isolamento delle sorgenti](docs/AI_STUDIO.md). Lo Studio importa i progetti Demucs/Basic Pitch per voce, basso, batteria e altri, con note polifoniche; produce partitura completa o singola linea, MIDI e PDF per ciascuna parte. **Tracce → Mixer audio originale** sceglie e combina una o più sorgenti reali direttamente da WAV stereo, producendo PCM 24 bit senza MIDI, con protezione globale anti-clipping.
+
+**Limite:** l'analisi neurale è oggi preparata su computer e poi importata come ZIP; il microfono Live e l'analisi rapida del telefono usano DSP euristico e NON isolano realmente ogni strumento.
+
+
 **Scopo originario:** il microfono ascolta una canzone; l'app riconosce le parti musicali e le trascrive in **pentagrammi simultanei separati**, per poi lasciare ascoltare, correggere ed esportare ogni parte. La voce cantata è una parte del progetto, non una semplice funzionalità karaoke. La modalità Studio completa la trascrizione e permette le correzioni con NoteLab.
 
 ## Flusso principale, adesso funzionante

@@ -8,6 +8,7 @@ class MultiTrackPanel extends StatelessWidget {
   const MultiTrackPanel({
     super.key,
     required this.parts,
+    this.separatedAudio = false,
     required this.rhythm,
     required this.selected,
     required this.gains,
@@ -22,6 +23,7 @@ class MultiTrackPanel extends StatelessWidget {
   });
 
   final List<InstrumentPart> parts;
+  final bool separatedAudio;
   final RhythmReport? rhythm;
   final InstrumentFamily? selected;
   final Map<InstrumentFamily, double> gains;
@@ -39,9 +41,12 @@ class MultiTrackPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'Riconoscimento per registro · stima sperimentale.',
-          style: TextStyle(color: Color(0xFFB7C7D0), fontSize: 12),
+        Text(
+          separatedAudio
+            ? 'Sorgenti Demucs e note Basic Pitch · analisi AI locale'
+            : 'Registri stimati · nessuna separazione reale degli strumenti',
+          style: const TextStyle(
+            color: Color(0xFFB7C7D0), fontSize: 12),
         ),
         const SizedBox(height: 8),
         if (parts.isNotEmpty)
@@ -70,7 +75,9 @@ class MultiTrackPanel extends StatelessWidget {
                       ),
                     ),
                     IconButton(
-                      tooltip: 'Ascolta frequenze del registro (non isolamento IA)',
+                      tooltip: separatedAudio
+                          ? 'Ascolta strumento realmente separato'
+                          : 'Ascolta banda di frequenza (non isolamento AI)',
                       onPressed: enabled
                           ? () => onListenBand(part.family) : null,
                       icon: const Icon(Icons.headphones),
@@ -84,7 +91,9 @@ class MultiTrackPanel extends StatelessWidget {
                       ),
                     ),
                   ]),
-                  Text('Livello stimato del registro: '
+                  Text(separatedAudio
+                     ? 'Livello sorgente importata: '
+                     : 'Livello stimato del registro: '
                      '${(part.signalLevel * 100).round()}%',
                      style: const TextStyle(fontSize: 11)),
                   Row(children: [

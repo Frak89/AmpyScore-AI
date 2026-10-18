@@ -13,6 +13,7 @@ class InstrumentPart {
     required this.confidence,
     this.programOverride,
     this.signalLevel = .6,
+    this.sourceName,
   });
 
   final InstrumentFamily family;
@@ -20,9 +21,10 @@ class InstrumentPart {
   final double confidence;
   final int? programOverride;
   final double signalLevel; // relative band strength, not true stem loudness.
+  final String? sourceName; // Explicit AI stem label from imported package.
 
   String get id => family.name;
-  String get name => switch (family) {
+  String get name => sourceName ?? switch (family) {
         InstrumentFamily.bass => 'Basso (stima)',
         InstrumentFamily.harmony => 'Tastiera / armonia (stima)',
         InstrumentFamily.melody => 'Melodia acuta (stima)',

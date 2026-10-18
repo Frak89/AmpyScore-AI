@@ -36,12 +36,16 @@ class ScoreCell {
     this.note,
     this.tieStart = false,
     this.tieStop = false,
+    this.voice = 0,
+    this.chord = false,
   });
   final int start;
   final int length;
   final ScoreNote? note;
   final bool tieStart; // Continue to next cell.
   final bool tieStop; // Continued from previous cell.
+  final int voice;
+  final bool chord; // Secondary simultaneous note of equal rhythm.
   bool get isRest => note == null || note!.isRest;
 }
 
@@ -59,9 +63,11 @@ class ScoreProject {
     required this.notes,
     this.beatsPerBar = 4,
     this.minimumDurationSeconds = 0,
+    this.polyphonic = false,
   });
   int bpm;
   int beatsPerBar;
+  final bool polyphonic;
   final double minimumDurationSeconds;
   int get barTicks => ticksPerQuarter * beatsPerBar;
   final List<InstrumentPart> parts;
@@ -70,10 +76,12 @@ class ScoreProject {
 
   factory ScoreProject.fromTranscription(
       List<InstrumentPart> parts, int bpm,
-      {int beatsPerBar = 4, double minimumDurationSeconds = 0}) {
+      {int beatsPerBar = 4, double minimumDurationSeconds = 0,
+      bool polyphonic = false}) {
     final project = ScoreProject(bpm: bpm.clamp(40, 240),
         parts: parts, notes: [], beatsPerBar: beatsPerBar,
-        minimumDurationSeconds: minimumDurationSeconds);
+        minimumDurationSeconds: minimumDurationSeconds,
+        polyphonic: polyphonic);
     final ticksPerSecond = project.bpm * ticksPerQuarter / 60.0;
     for (final part in parts) {
       ScoreNote? last;
@@ -83,7 +91,8 @@ class ScoreProject {
         final begin = math.max(0, (note.startSeconds * ticksPerSecond).round());
         final end = math.max(begin + 1,
             (note.endSeconds * ticksPerSecond).round());
-        final adjustedStart = last == null ? begin : math.max(begin, last.end);
+        final adjustedStart = last == null || polyphonic
+            ? begin : math.max(begin, last.end);
         if (adjustedStart >= end) continue;
         final item = ScoreNote(
           id: project._nextId++, family: part.family,
@@ -164,6 +173,8 @@ class ScoreProject {
   /// treated as independent polyphonic voices in this early score editor.
   /// Overlap produces a red bar, rather than silently hiding the problem.
   bool hasOverflow(InstrumentFamily family, int bar) {
+    // Simultaneous musical voices are intentional, not 4/4 overflow.
+    if (polyphonic) return false;
     final begin = bar * barTicks;
     final end = begin + barTicks;
     var total = 0;
@@ -179,6 +190,7 @@ class ScoreProject {
   }
 
   List<ScoreMeasure> measuresRange(InstrumentFamily family, int first, int last) {
+    if (polyphonic) return _polyphonicMeasures(family, first, last);
     final lane = forFamily(family);
     final out = <ScoreMeasure>[];
     for (var bar = first.clamp(0, barCount); bar < last && bar < barCount; bar++) {
@@ -208,8 +220,89 @@ class ScoreProject {
     return out;
   }
 
+  /// Separate overlapping notes into proper MusicXML voices, while keeping
+  /// exact same-onset and same-duration simultaneous notes as chords.
+  List<ScoreMeasure> _polyphonicMeasures(
+      InstrumentFamily family, int first, int last) {
+    final ordered = forFamily(family);
+    final result = <ScoreMeasure>[];
+    for (var bar = first.clamp(0, barCount);
+        bar < last && bar < barCount; bar++) {
+      final begin = bar * barTicks, end = begin + barTicks;
+      final notes = ordered.where((note) =>
+          note.end > begin && note.start < end).toList();
+      final voices = <List<ScoreNote>>[];
+      final voiceEnd = <int>[];
+      for (final note in notes) {
+        var chosen = -1;
+        var chord = false;
+        for (var v = 0; v < voices.length; v++) {
+          final previous = voices[v].last;
+          if (!note.isRest && !previous.isRest &&
+              note.start == previous.start && note.end == previous.end) {
+            chosen = v;
+            chord = true;
+            break;
+          }
+        }
+        if (!chord) {
+          for (var v = 0; v < voiceEnd.length; v++) {
+            if (voiceEnd[v] <= note.start) {
+              chosen = v;
+              break;
+            }
+          }
+        }
+        if (chosen < 0) {
+          chosen = voices.length;
+          voices.add([]);
+          voiceEnd.add(begin);
+        }
+        voices[chosen].add(note);
+        voiceEnd[chosen] = math.max(voiceEnd[chosen], note.end);
+      }
+      if (voices.isEmpty) voices.add([]);
+      final all = <ScoreCell>[];
+      for (var voice = 0; voice < voices.length; voice++) {
+        var cursor = begin;
+        ScoreNote? previous;
+        for (final note in voices[voice]) {
+          final start = math.max(begin, note.start);
+          final finish = math.min(end, note.end);
+          final chord = previous != null &&
+              !previous.isRest && !note.isRest &&
+              note.start == previous.start && note.end == previous.end;
+          if (chord) {
+            all.addAll(_split(start, finish, note,
+                voice: voice, chord: true,
+                continuesFrom: start > note.start,
+                continuesTo: finish < note.end));
+          } else {
+            if (start > cursor) {
+              all.addAll(_split(cursor, start, null, voice: voice));
+            }
+            if (finish > math.max(cursor, start)) {
+              all.addAll(_split(math.max(cursor, start), finish, note,
+                voice: voice,
+                continuesFrom: math.max(cursor, start) > note.start,
+                continuesTo: finish < note.end));
+              cursor = finish;
+            }
+          }
+          previous = note;
+        }
+        if (cursor < end) {
+          all.addAll(_split(cursor, end, null, voice: voice));
+        }
+      }
+      result.add(ScoreMeasure(bar, all, false));
+    }
+    return result;
+  }
+
   List<ScoreCell> _split(int start, int end, ScoreNote? note,
-      {bool continuesFrom = false, bool continuesTo = false}) {
+      {bool continuesFrom = false, bool continuesTo = false,
+      int voice = 0, bool chord = false}) {
     final cells = <ScoreCell>[];
     var at = start;
     const values = [32, 24, 16, 12, 8, 6, 4, 3, 2, 1];
@@ -221,6 +314,8 @@ class ScoreProject {
         start: at,
         length: units,
         note: note,
+        voice: voice,
+        chord: chord,
         tieStop: note != null && !note.isRest && (continuesFrom || at != start),
         tieStart: note != null && !note.isRest &&
             (continuesTo || at + units != end),
@@ -295,9 +390,20 @@ class MusicXmlWriter {
               '</direction-type><sound tempo="${score.bpm}"/>'
               '</direction>');
         }
-        for (var i = 0; i < bar.cells.length; i++) {
-          final cell = bar.cells[i];
+        final voiceIds = bar.cells.map((cell) => cell.voice)
+            .toSet().toList()..sort();
+        for (var vi = 0; vi < voiceIds.length; vi++) {
+          if (vi > 0) {
+            out.writeln('<backup><duration>'
+                '${score.barTicks * midiTicksPerThirtySecond}'
+                '</duration></backup>');
+          }
+          final cells = bar.cells.where(
+              (cell) => cell.voice == voiceIds[vi]).toList();
+          for (var i = 0; i < cells.length; i++) {
+          final cell = cells[i];
           out.write('<note>');
+          if (cell.chord && !cell.isRest) out.write('<chord/>');
           if (cell.isRest) {
             out.write('<rest/>');
           } else {
@@ -312,12 +418,13 @@ class MusicXmlWriter {
           out.write('<duration>${cell.length * midiTicksPerThirtySecond}</duration>');
           if (cell.tieStop) out.write('<tie type="stop"/>');
           if (cell.tieStart) out.write('<tie type="start"/>');
+          if (score.polyphonic) out.write('<voice>${vi + 1}</voice>');
           out.write('<type>${_type(cell.length)}</type>');
           if ([3, 6, 12, 24].contains(cell.length)) out.write('<dot/>');
           if (!cell.isRest) {
-            final beam = _beam(bar.cells, i, 4);
+            final beam = _beam(cells, i, 4);
             if (beam != null) out.write('<beam number="1">$beam</beam>');
-            final second = _beam(bar.cells, i, 2);
+            final second = _beam(cells, i, 2);
             if (second != null) out.write('<beam number="2">$second</beam>');
           }
           if (cell.tieStop || cell.tieStart) {
@@ -327,6 +434,7 @@ class MusicXmlWriter {
             out.write('</notations>');
           }
           out.writeln('</note>');
+        }
         }
         out.writeln('</measure>');
       }
