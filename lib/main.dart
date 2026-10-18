@@ -214,6 +214,8 @@ class _StudioPageState extends State<StudioPage> {
       _status = 'Brano pronto.';
       _analysisProgress = 0;
       _analysisDuration = 0;
+      _analysisProgress = 0;
+      _analysisDuration = 0;
     });
   }
 
@@ -542,180 +544,64 @@ class _StudioPageState extends State<StudioPage> {
     }
   });
 
+  /// Writes a full-length PCM comparison to disk without allocating a
+  /// full-song Float32List or cutting the MIDI at 40 seconds.
   Future<void> _renderMultiPreview(
     List<InstrumentPart> parts, double duration,
   ) async {
-    final data = await compute(
-      MultiTrackMidi.renderMix,
-      TrackMix(parts, Map.of(_partGains), durationSeconds: duration),
-    );
     final dir = await getApplicationDocumentsDirectory();
     final newFile = File('${dir.path}/ampyscore_mix_'
         '${DateTime.now().microsecondsSinceEpoch}.wav');
-    await newFile.writeAsBytes(data, flush: true);
+    final writer = await newFile.open(mode: FileMode.write);
+    var written = 0;
+    Uint8List? header;
+    try {
+      const segmentSeconds = 12.0;
+      // Reserve WAV header first; write PCM bytes sequentially.
+      await writer.writeFrom(Uint8List(44));
+      for (var start = 0.0; start < duration; start += segmentSeconds) {
+        final seconds = math.min(segmentSeconds, duration - start);
+        final segmentParts = <InstrumentPart>[
+          for (final part in parts)
+            InstrumentPart(
+              family: part.family, confidence: part.confidence,
+              notes: [
+                for (final note in part.notes)
+                  if (note.endSeconds > start &&
+                      note.startSeconds < start + seconds)
+                    DetectedNote(
+                      midi: note.midi,
+                      startSeconds: math.max(0, note.startSeconds - start),
+                      endSeconds: math.min(seconds, note.endSeconds - start),
+                      confidence: note.confidence),
+              ],
+            ),
+        ];
+        final wav = await compute(
+          MultiTrackMidi.renderMix,
+          TrackMix(segmentParts, Map.of(_partGains),
+              durationSeconds: seconds),
+        );
+        header ??= Uint8List.fromList(wav.sublist(0, 44));
+        await writer.writeFrom(wav, 44);
+        written += wav.length - 44;
+      }
+      if (header == null) throw const FormatException('MIDI vuoto.');
+      final view = ByteData.sublistView(header);
+      view.setUint32(4, written + 36, Endian.little);
+      view.setUint32(40, written, Endian.little);
+      await writer.setPosition(0);
+      await writer.writeFrom(header);
+      await writer.flush();
+    } finally {
+      await writer.close();
+    }
     final old = _lastMixPath;
     await _midiPlayer.setFilePath(newFile.path);
     await _midiPlayer.setVolume(_midiVolume);
     _lastMixPath = newFile.path;
     if (old != null) {
-      try {
-        await File(old).delete();
-      } catch (_) {
-        // OS may still hold the last playback file.
-      }
-    }
-  }
-
-  Future<void> _prepareMetronome() async {
-    if (!_metronomeEnabled || _trackPath == null) return;
-    await _metronomePlayer.stop();
-    final settings = MetronomeSettings(
-      bpm: _metronomeBpm,
-      subdivisions: _metronomeSubdivisions,
-      durationSeconds: _durationSeconds + .3,
-    );
-    final bytes = await compute(MetronomeSynth.render, settings);
-    final dir = await getApplicationDocumentsDirectory();
-    final file = File('${dir.path}/metro_'
-        '${DateTime.now().microsecondsSinceEpoch}.wav');
-    await file.writeAsBytes(bytes, flush: true);
-    await _metronomePlayer.setFilePath(file.path);
-    await _metronomePlayer.setVolume(_metronomeVolume);
-    _metronomeReady = true;
-  }
-
-  Future<void> _configureMetronome({
-    bool? enabled,
-    int? bpm,
-    int? subdivisions,
-  }) async {
-    if (_busy) return;
-    final previousMode = _playing ? _mode : null;
-    final oldPosition = _cursor;
-    if (previousMode != null) await _pauseTransport();
-    if (mounted) {
-      setState(() {
-        if (enabled != null) _metronomeEnabled = enabled;
-        if (bpm != null) _metronomeBpm = bpm;
-        if (subdivisions != null) _metronomeSubdivisions = subdivisions;
-        _metronomeReady = false;
-      });
-    }
-    if (_metronomeEnabled && _trackPath != null) {
-      await _prepareMetronome();
-      await _metronomePlayer.seek(oldPosition);
-    } else {
-      await _metronomePlayer.pause();
-    }
-    if (previousMode != null) {
-      await _togglePlaybackMode(previousMode);
-    }
-  }
-
-  Future<void> _jumpToNote(ScoreNote note) async {
-    if (_busy || _trackPath == null) return;
-    final mode = _mode ??
-        (_midiReady ? _PlaybackMode.both : _PlaybackMode.original);
-    await _pauseTransport();
-    if (mounted) setState(() {
-      _selectedNoteId = note.id;
-      _selectedFamily = note.family;
-    });
-    await _seekTransport(Duration(
-      microseconds: (_score!.timeOf(note) * 1000000).round(),
-    ));
-    await _togglePlaybackMode(mode);
-  }
-
-  Future<void> _checkForUpdates() => _execute(() async {
-    final update = await AppUpdates.check();
-    if (!mounted) return;
-    final target = update?.url ?? AppUpdates.releases;
-    final title = update == null
-        ? 'Nessuna release pubblicata'
-        : update.hasNewVersion
-            ? 'Disponibile ${update.version}'
-            : 'Versione aggiornata';
-    final open = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
-        title: Text(title),
-        content: Text(update == null
-          ? 'Puoi verificare le release GitHub.'
-          : 'Le nuove versioni si installano dal browser. '
-            'Per aggiornare mantenendo i dati serve la stessa firma APK.'),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false),
-              child: const Text('Chiudi')),
-          FilledButton(onPressed: () => Navigator.pop(context, true),
-              child: const Text('Apri GitHub')),
-        ],
-      ),
-    );
-    if (open == true) await AppUpdates.openReleases(url: target);
-  });
-
-  Future<void> _findSongOnline() async {
-    if (_searching) return;
-    setState(() => _searching = true);
-    try {
-      final candidates = await SongLookup.find(
-        '${_songQuery.text.trim()}.mp3');
-      if (!mounted) return;
-      setState(() => _songResults = candidates);
-      await showDialog<void>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
-          content: SizedBox(
-            width: 460,
-            child: candidates.isEmpty
-              ? const Text('Nessuna corrispondenza trovata.')
-              : ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final song in candidates)
-                    ListTile(
-                      title: Text(song.title),
-                      subtitle: Text(song.artist),
-                      trailing: PopupMenuButton<String>(
-                        tooltip: 'Apri riferimenti online',
-                        icon: const Icon(Icons.open_in_new),
-                        onSelected: (choice) {
-                          final url = choice == 'info'
-                              ? song.url
-                              : Uri.https('www.google.com', '/search', {
-                                  'q': '${song.title} ${song.artist} '
-                                      'spartito MusicXML',
-                                });
-                          unawaited(launchUrl(url,
-                              mode: LaunchMode.externalApplication));
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'info',
-                              child: Text('Dettagli brano')),
-                          PopupMenuItem(value: 'score',
-                              child: Text('Cerca spartito')),
-                        ],
-                      ),
-                    ),
-                ],
-              ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(context),
-                child: const Text('Chiudi')),
-          ],
-        ),
-      );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ricerca: $error')),
-        );
-      }
-    } finally {
-      if (mounted) setState(() => _searching = false);
+      try { await File(old).delete(); } catch (_) {}
     }
   }
 
@@ -729,9 +615,8 @@ class _StudioPageState extends State<StudioPage> {
     if (duration != null && duration.inMilliseconds > 0) {
       return duration.inMilliseconds / 1000.0;
     }
-    if (_notes.isNotEmpty) {
-      return _notes.last.endSeconds;
-    }
+    if (_analysisDuration > 0) return _analysisDuration;
+    if (_notes.isNotEmpty) return _notes.last.endSeconds;
     return 1;
   }
 
@@ -1077,7 +962,8 @@ class _StudioPageState extends State<StudioPage> {
             if (_pageIndex == 0) _importToolbar(),
             if (_busy) ...[
               const SizedBox(height: 10),
-              const LinearProgressIndicator(minHeight: 3),
+              LinearProgressIndicator(minHeight: 3,
+                value: _analysisProgress > 0 ? _analysisProgress : null),
             ],
             if (!_busy && _trackPath != null && _pageIndex == 0) ...[
               const SizedBox(height: 8),
