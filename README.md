@@ -1,7 +1,16 @@
-# AmpyScore Studio 0.7 — intera canzone, GM SoundFont, partitura sincronizzata
+# AmpyScore Studio 0.9 — tempo variabile, MIDI SoundFont, partitura sincronizzata
 
 Applicazione Flutter gratuita e open source (MIT), elaborazione audio musicale locale. **Il motore di trascrizione non è ancora un modello AI di source separation**: i registri basso/armonia/melodia/percussioni sono stime da frequenze, perciò le note non saranno fedeli a un brano jazz polifonico complesso come *Take Five*. Non confondere qualità del sintetizzatore MIDI (timbrica) con accuratezza delle note estratte.
 
+
+## Novità v0.9 — pratica musicale
+
+- **Velocità audio continua 0,25×–4×** nello Studio, regolabile mentre il brano sta suonando. Pulsante **1×** per il ripristino immediato. La selezione si applica all'audio originale (o base stereo filtrata), al MIDI, al metronomo e al filtro ascoltato. Gli attacchi, la barra sul pentagramma e le durate restano riferiti alla timeline originale: cambiano la velocità di avanzamento, non i dati dello spartito.
+- **Pitch MIDI invariato:** Android FluidSynth 4.0.4 supporta `setMidiTempo(factor)` senza trasporre le note; `just_audio.setSpeed` usa i controlli nativi del riproduttore audio, ma qualità di time-stretch/pitch a velocità estreme dipende dal dispositivo.
+- **Opzioni → Audio sperimentale:** buffer nativo SoundFont MIDI da **128/256/512/1024/2048 frame**, campionamento selezionabile **44,1/48 kHz**, ripristino **512 / 44,1 kHz**. La configurazione viene salvata in locale con `shared_preferences`; cambiando buffer o sample-rate il sintetizzatore si riavvia e la riproduzione riprende dal punto corrente.
+- Buffer maggiore può ridurre interruzioni o scricchiolii aumentando la latenza. **Non migliora la qualità dei campioni originali**, non converte il file originale, né corregge errori delle note riconosciute. I nuovi parametri sono solo del **SoundFont Android**; nessun controllo sul buffer MP3 di sistema viene dichiarato. Il tempo teorico mostrato nell'app è numero di frame / frequenza di campionamento e **non** misura la latenza audio finale.
+- Preset salvati su Android/iOS; campionamento e buffer GM modificabili nell'interfaccia solo su Android perché il playback dei MIDI-file SoundFont del plugin è attualmente Android-only.
+- L'uso di `setSpeed` per brano/metronomo e `setMidiTempo` per MIDI consente un confronto sincronizzato approssimativamente. Se il Bluetooth aggiunge latenza o l'audio viene time-stretched pesantemente, l'allineamento al campione non è garantito.
 
 ## v0.8 — ascolto migliore, riduzione vocale e prestazioni
 
