@@ -15,6 +15,7 @@ class MultiTrackPanel extends StatelessWidget {
     required this.enabled,
     required this.onSelect,
     required this.onSolo,
+    required this.onListenBand,
     required this.onGain,
     required this.onGainDone,
   });
@@ -27,6 +28,7 @@ class MultiTrackPanel extends StatelessWidget {
   final bool enabled;
   final ValueChanged<InstrumentFamily> onSelect;
   final ValueChanged<InstrumentFamily> onSolo;
+  final ValueChanged<InstrumentFamily> onListenBand;
   final void Function(InstrumentFamily, double) onGain;
   final VoidCallback onGainDone;
 
@@ -55,12 +57,18 @@ class MultiTrackPanel extends StatelessWidget {
                             ? (_) => onSelect(part.family) : null,
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    IconButton(
+                      tooltip: 'Ascolta frequenze del registro (non isolamento IA)',
+                      onPressed: enabled
+                          ? () => onListenBand(part.family) : null,
+                      icon: const Icon(Icons.headphones),
+                    ),
+                    const SizedBox(width: 5),
                     OutlinedButton(
                       onPressed: enabled
                           ? () => onSolo(part.family) : null,
                       child: Text(
-                        solo == part.family ? 'Ripristina' : 'Solo',
+                        solo == part.family ? 'Ripristina' : 'Solo MIDI',
                       ),
                     ),
                   ]),
