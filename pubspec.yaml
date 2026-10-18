@@ -1,7 +1,7 @@
 name: ampy_score_ai
-description: "AmpyScore AI: offline monophonic audio to notation proof of concept."
+description: "AmpyScore AI: offline score studio, editable 4/4 partitures and experimental frequency stems."
 publish_to: none
-version: 0.3.0+3
+version: 0.4.0+4
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
