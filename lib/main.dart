@@ -831,7 +831,7 @@ class _StudioPageState extends State<StudioPage> {
       bytes.setUint16(32, 2, Endian.little);
       bytes.setUint16(34, 16, Endian.little);
       bytes.setUint32(40, frames * 2, Endian.little);
-      await writer.setLength(44 + frames * 2);
+      await writer.truncate(44 + frames * 2);
       await writer.setPosition(0);
       await writer.writeFrom(head);
       await writer.flush();
