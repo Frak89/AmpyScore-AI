@@ -297,7 +297,7 @@ class _StudioPainter extends CustomPainter {
         }
         for (final cell in measure.cells) {
           final x = lead + (cell.start + cell.length / 2 - firstBar * score.barTicks) *
-              bw / ticksPerBar;
+              bw / score.barTicks;
           if (cell.isRest) {
             final symbol = switch (cell.length) {
               32 => '▰', 24 || 16 => '▬',
@@ -472,5 +472,5 @@ class _StudioPainter extends CustomPainter {
   bool shouldRepaint(covariant _StudioPainter old) =>
       old.score != score || old.position != position ||
       old.ink != ink || old.selected != selected || old.blink != blink ||
-      old.firstBar != firstBar || old.lastBar != lastBar || true;
+      true; // Edited ScoreProject may retain identity; always redraw.
 }
