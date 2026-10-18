@@ -14,7 +14,7 @@ class MultiTrackMidi {
   static const int ticksPerQuarter = 480;
 
   /// Type-1 SMF with tempo track and one actual MIDI track per family.
-  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120, int beatsPerBar = 4}) {
+  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120, int beatsPerBar = 4, Map<InstrumentFamily, double>? gains}) {
     final output = BytesBuilder(copy: false);
     final checkedBpm = bpm.clamp(40, 240);
     final ticksPerSecond = ticksPerQuarter * checkedBpm / 60.0;
@@ -40,11 +40,14 @@ class MultiTrackMidi {
           _Event(0, -2, [0xC0 | channel, part.midiProgram]),
       ];
       for (final note in part.notes) {
+        final velocity = (100 * (gains?[part.family] ?? 1.0))
+            .round().clamp(0, 127);
+        if (velocity == 0) continue;
         final first = (note.startSeconds * ticksPerSecond).round().clamp(0, 40000 * 960);
         final last = math.max(first + 1,
             (note.endSeconds * ticksPerSecond).round().clamp(0, 40000 * 960));
         final pitch = note.midi.clamp(0, 127);
-        messages.add(_Event(first, 1, [0x90 | channel, pitch, 100]));
+        messages.add(_Event(first, 1, [0x90 | channel, pitch, velocity]));
         messages.add(_Event(last, 0, [0x80 | channel, pitch, 0]));
       }
       messages.sort((a, b) {
