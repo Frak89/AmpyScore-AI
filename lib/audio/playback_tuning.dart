@@ -10,7 +10,7 @@ class PlaybackTuning {
   static const int defaultSampleRate = 44100;
 
   static double speed(double proposed) =>
-      proposed.isFinite ? proposed.clamp(minSpeed, maxSpeed) : normalSpeed;
+      proposed.isFinite ? proposed.clamp(minSpeed, maxSpeed).toDouble() : normalSpeed;
 
   static String speedLabel(double speed) {
     final fixed = speed.toStringAsFixed(2);
