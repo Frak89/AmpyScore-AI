@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -196,6 +197,8 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _beatsPerBar = RegExp(r'take[ _-]?five|take[ _-]?5',
+          caseSensitive: false).hasMatch(name) ? 5 : 4;
       _songQuery.text = SongLookup.filenameTitle(name) ?? '';
       _songResults = const [];
       _notes = const [];
@@ -411,7 +414,9 @@ class _StudioPageState extends State<StudioPage> {
       ),
     ];
     final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
-    final project = ScoreProject.fromTranscription(parts, bpm);
+    final project = ScoreProject.fromTranscription(parts, bpm,
+        beatsPerBar: _beatsPerBar,
+        minimumDurationSeconds: _analysisDuration);
     _metronomeBpm = project.bpm;
     _metronomeReady = false;
     if (mounted) {
@@ -828,10 +833,12 @@ class _StudioPageState extends State<StudioPage> {
         if (_notes.isEmpty) return;
         final score = _score;
     final bytes = score != null
-        ? MultiTrackMidi.export(_editedParts(), bpm: score.bpm)
+        ? MultiTrackMidi.export(_editedParts(), bpm: score.bpm,
+            beatsPerBar: _beatsPerBar)
         : _parts.isEmpty
             ? MidiEngine.exportMidi(_notes)
-            : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120);
+            : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120,
+            beatsPerBar: _beatsPerBar);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
           fileName: _parts.isEmpty
@@ -1385,6 +1392,30 @@ class _StudioPageState extends State<StudioPage> {
             },
           ),
         ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.queue_music,
+        title: 'Tempo in chiave',
+        child: SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(value: 3, label: Text('3/4')),
+            ButtonSegment(value: 4, label: Text('4/4')),
+            ButtonSegment(value: 5, label: Text('5/4')),
+            ButtonSegment(value: 6, label: Text('6/4')),
+          ],
+          selected: {_beatsPerBar},
+          onSelectionChanged: (value) {
+            setState(() {
+              _beatsPerBar = value.first;
+              _score?.beatsPerBar = value.first;
+              _metronomeReady = false;
+            });
+            if (_metronomeEnabled) {
+              unawaited(_configureMetronome());
+            }
+          },
+        ),
       ),
       const SizedBox(height: 12),
       _section(
