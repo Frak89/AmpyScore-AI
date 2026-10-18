@@ -612,6 +612,120 @@ class _StudioPageState extends State<StudioPage> {
     await _analyse();
   }
 
+  Future<void> _exportPdf() => _execute(() async {
+    final score = _score;
+    if (score == null) return;
+    final pdf = await ScorePdf.render(
+      score, title: _trackName,
+      sepia: _paperTone == PaperTone.sepia);
+    await Printing.sharePdf(
+      bytes: pdf,
+      filename: 'AmpyScore_partitura.pdf',
+    );
+    if (mounted) setState(() =>
+        _status = 'Partitura PDF pronta per stampa o salvataggio.');
+  });
+
+  Future<WavWindowReader> _stereoForExports() async {
+    final original = _trackPath;
+    if (original == null) throw StateError('Apri un brano.');
+    if (_stereoDecodePath != null &&
+        await File(_stereoDecodePath!).exists()) {
+      return WavWindowReader.open(File(_stereoDecodePath!));
+    }
+    try {
+      final reader = await WavWindowReader.open(File(original));
+      if (reader.channels != 2) throw const FormatException(
+        'Il brano è mono. Serve uno stereo con voce centrale.');
+      return reader;
+    } on FormatException {
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/stereo_for_export_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav';
+      await AudioDecoder.convertToWav(original, path,
+        sampleRate: 44100, channels: 2, bitDepth: 16);
+      final reader = await WavWindowReader.open(File(path));
+      _stereoDecodePath = path;
+      return reader;
+    }
+  }
+
+  Future<void> _exportAudio(String choice) => _execute(() async {
+    if (_trackPath == null) throw StateError('Importa un brano.');
+    final dir = await getTemporaryDirectory();
+    final stem = choice.startsWith('band_')
+      ? choice.substring(5)
+      : choice;
+    final path = '${dir.path}/AmpyScore_$stem.wav';
+    final target = File(path);
+    if (choice == 'instrumental') {
+      if (_instrumentalPath != null &&
+          await File(_instrumentalPath!).exists()) {
+        // Share existing full-song WAV directly, avoid another decoding pass.
+        await SharePlus.instance.share(
+          ShareParams(files: [XFile(_instrumentalPath!,
+              mimeType: 'audio/wav')],
+            fileNameOverrides: ['AmpyScore_base_strumentale.wav']));
+        return;
+      }
+      final reader = await _stereoForExports();
+      if (reader.channels != 2) {
+        throw const FormatException('Base senza voce: serve audio stereo.');
+      }
+      await StereoVocalReducer.export(reader,target,
+        strength: _vocalStrength);
+    } else if (choice == 'voice') {
+      final reader = await _stereoForExports();
+      if (reader.channels != 2) {
+        throw const FormatException('Solo voce: serve audio stereo.');
+      }
+      await CenterVoiceExporter.export(reader,target);
+    } else if (choice.startsWith('band_')) {
+      final family = InstrumentFamily.values
+          .where((f) => f.name == stem).firstOrNull;
+      if (family == null) throw StateError('Parte non valida.');
+      final focus = switch (family) {
+        InstrumentFamily.bass => FocusStem.bass,
+        InstrumentFamily.harmony => FocusStem.middle,
+        InstrumentFamily.melody => FocusStem.vocalCandidate,
+        InstrumentFamily.drums => FocusStem.percussion,
+      };
+      final sourcePath = _analysisPath;
+      if (sourcePath == null) throw StateError('Analizza un brano.');
+      await BandFocusRenderer.export(
+        await WavWindowReader.open(File(sourcePath)),target,focus);
+    } else {
+      throw StateError('Esportazione audio non valida.');
+    }
+    final result = await SharePlus.instance.share(ShareParams(
+      files: [XFile(target.path,mimeType:'audio/wav')],
+      fileNameOverrides: ['AmpyScore_$stem.wav'],
+      title: 'Esporta traccia WAV',
+    ));
+    if (mounted) setState(() =>
+      _status = result.status == ShareResultStatus.success
+        ? 'Traccia WAV condivisa.'
+        : 'Traccia WAV pronta: ${target.path}');
+  });
+
+  Future<void> _exportSoloMidi(InstrumentFamily family) => _execute(() async {
+    final match=_withPrograms(_editedParts())
+        .where((part)=>part.family==family).firstOrNull;
+    if(match==null) return;
+    final data=MultiTrackMidi.export([match],
+      bpm:_score?.bpm??_rhythm?.bpm??120,
+      beatsPerBar:_beatsPerBar,
+      gains:_partGains,
+      semitoneLayer:_semitoneLayer);
+    final saved=await FilePicker.saveFile(
+      dialogTitle:'Esporta MIDI della singola parte',
+      fileName:'AmpyScore_${family.name}_solo.mid',
+      type:FileType.custom,allowedExtensions:['mid'],
+      bytes:data);
+    if(mounted && saved!=null) setState(() =>
+      _status='MIDI singola parte esportato.');
+  });
+
   Future<void> _exportMusicXml() => _execute(() async {
     final score = _score;
     if (score == null) return;
