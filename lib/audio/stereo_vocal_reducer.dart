@@ -76,7 +76,9 @@ class StereoVocalReducer {
       final r = (right * (1 - amount) + (-side + bass) * amount) * finalGain;
       double limit(double v) {
         final x = v.abs();
-        final value = x <= .90 ? v : (v / (1 + 2.2 * (x - .90)));
+        final excess = x - .90;
+        final value = x <= .90 ? v :
+            (v.isNegative ? -1 : 1) * (.90 + .1 * excess / (.1 + excess));
         return value.clamp(-1.0, 1.0);
       }
       dst.setInt16(4 * i, (limit(l) * 32767).round(), Endian.little);
@@ -100,11 +102,30 @@ class StereoVocalReducer {
     try {
       await output.writeFrom(Uint8List(44));
       const chunkSeconds = 3.0;
+      var firstChunk = true;
       for (var start = 0.0; start < source.durationSeconds;
           start += chunkSeconds) {
         final seconds = math.min(
             chunkSeconds, source.durationSeconds - start);
         final data = await source.window(start, seconds);
+        if (firstChunk) {
+          firstChunk = false;
+          final view = ByteData.sublistView(data);
+          final frames = (data.length - 44) ~/ 4;
+          var stereoEnergy = 0.0, totalEnergy = 1e-9;
+          for (var i = 0; i < frames; i += 7) {
+            final l = view.getInt16(44 + i * 4, Endian.little).toDouble();
+            final r = view.getInt16(46 + i * 4, Endian.little).toDouble();
+            stereoEnergy += (l - r) * (l - r);
+            totalEnergy += (l + r) * (l + r);
+          }
+          if (totalEnergy > 5e5 &&
+              stereoEnergy / totalEnergy < 0.00002) {
+            throw const FormatException(
+              'Canali stereo quasi identici: '
+              'riduzione vocale non applicabile.');
+          }
+        }
         final result = await compute(process,
             VocalChunkRequest(data, strength, bassMemory, gainMemory));
         bassMemory = result.bassMemory;
