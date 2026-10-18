@@ -904,9 +904,11 @@ class _StudioPageState extends State<StudioPage> {
             activeNoteId: _selectedNoteId,
             onTapNote: (note) {
               _selectFamily(note.family);
-              setState(() {
-                _selectedNoteId = note.id;
-              });
+              setState(() => _selectedNoteId = note.id);
+              final index = _notes.indexWhere((item) =>
+                  item.midi == note.midi &&
+                  (item.startSeconds - score.timeOf(note)).abs() < 0.25);
+              if (index >= 0) unawaited(_playOneNote(index));
             },
           ),
           const SizedBox(height: 12),
