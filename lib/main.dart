@@ -1931,6 +1931,11 @@ class _StudioPageState extends State<StudioPage> {
             icon: const Icon(Icons.description_outlined),
             label: const Text('MusicXML'),
           ),
+          OutlinedButton.icon(
+            onPressed: score != null && !_busy ? _exportPdf : null,
+            icon: const Icon(Icons.picture_as_pdf_outlined),
+            label: const Text('PDF'),
+          ),
           if (ready)
             TextButton(
               onPressed: _analyse,
@@ -2083,34 +2088,124 @@ class _StudioPageState extends State<StudioPage> {
               ),
         ],
         if (_parts.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          for (final part in _parts)
-            if (!part.percussion)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(children: [
-                  Expanded(child: Text(part.name,
-                    maxLines: 1, overflow: TextOverflow.ellipsis)),
-                  const SizedBox(width: 8),
-                  DropdownButton<int>(
-                    value: _gmPrograms[part.family] ?? part.midiProgram,
-                    items: [
-                      for (final entry in _gmNames.entries)
-                        DropdownMenuItem<int>(
-                          value: entry.key,
-                          child: Text(entry.value,
-                            style: const TextStyle(fontSize: 12)),
+          const SizedBox(height: 12),
+          _section(
+            icon: Icons.piano,
+            title: 'Strumenti General MIDI (128)',
+            child: Column(children: [
+              for (final part in _parts)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(part.name,style:const TextStyle(
+                        fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 5),
+                      if (!part.percussion)
+                        DropdownButtonFormField<int>(
+                          value: (_gmPrograms[part.family] ??
+                              part.midiProgram).clamp(0,127),
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            labelText: 'Timbro MIDI (128 strumenti)'),
+                          items: [
+                            for (var i=0;i<GmCatalog.programs.length;i++)
+                              DropdownMenuItem<int>(value:i,
+                                child: Text(GmCatalog.programLabel(i),
+                                  maxLines:1,overflow:TextOverflow.ellipsis)),
+                          ],
+                          onChanged:_busy?null:(program) {
+                            if(program==null)return;
+                            setState(()=>_gmPrograms[part.family]=program);
+                            unawaited(_remix());
+                          },
+                        )
+                      else
+                        DropdownButtonFormField<int>(
+                          value:_percussionKeyOverride??-1,
+                          isExpanded:true,
+                          decoration:const InputDecoration(
+                            border:OutlineInputBorder(),
+                            labelText:'Percussioni GM · canale 10'),
+                          items:[
+                            const DropdownMenuItem<int>(value:-1,
+                              child:Text('Automatico · note rilevate')),
+                            for(final entry in GmCatalog.percussion.entries)
+                              DropdownMenuItem<int>(value:entry.key,
+                                child:Text(GmCatalog.drumLabel(entry.key),
+                                  maxLines:1,overflow:TextOverflow.ellipsis)),
+                          ],
+                          onChanged:_busy?null:(key){
+                            if(key==null)return;
+                            setState(()=>_percussionKeyOverride=
+                                key<0?null:key);
+                            unawaited(_remix());
+                          },
                         ),
+                      Align(alignment:Alignment.centerRight,
+                        child:TextButton.icon(
+                          onPressed:_busy?null:()=>unawaited(
+                            _exportSoloMidi(part.family)),
+                          icon:const Icon(Icons.save_alt),
+                          label:const Text('Esporta MIDI traccia'),
+                        )),
                     ],
-                    onChanged: _busy ? null : (program) {
-                      if (program == null) return;
-                      setState(() => _gmPrograms[part.family] = program);
-                      unawaited(_remix());
-                    },
+                  ),
+                ),
+              SwitchListTile.adaptive(
+                contentPadding:EdgeInsets.zero,
+                title:const Text('Rinforzo cromatico +1 semitono'),
+                subtitle:const Text('Sperimentale, volume 16%. '
+                    'Può produrre dissonanza; disattivato di default.',
+                  style:TextStyle(fontSize:11)),
+                value:_semitoneLayer,
+                onChanged:_busy?null:(value){
+                  setState(()=>_semitoneLayer=value);
+                  unawaited(_remix());
+                },
+              ),
+            ]),
+          ),
+        ],
+        if (_trackPath != null)
+          _section(
+            icon: Icons.file_download_outlined,
+            title: 'Esporta audio (WAV)',
+            child: Column(
+              crossAxisAlignment:CrossAxisAlignment.stretch,
+              children:[
+                Wrap(spacing:8,runSpacing:8,children:[
+                  OutlinedButton.icon(
+                    onPressed:_busy?null:()=>
+                      unawaited(_exportAudio('instrumental')),
+                    icon:const Icon(Icons.music_note),
+                    label:const Text('Base senza voce'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed:_busy?null:()=>
+                      unawaited(_exportAudio('voice')),
+                    icon:const Icon(Icons.record_voice_over),
+                    label:const Text('Solo voce stimata'),
                   ),
                 ]),
-              ),
-        ],
+                const SizedBox(height:7),
+                for(final part in _parts)
+                  ListTile(
+                    dense:true,
+                    title:Text('${part.name} · WAV filtrato'),
+                    trailing:const Icon(Icons.download_outlined),
+                    onTap:_busy?null:()=>unawaited(
+                      _exportAudio('band_${part.family.name}')),
+                  ),
+                const Text('Filtri di frequenza, non separazione IA: '
+                  'voce e strumenti sovrapposti possono rimanere.',
+                  style:TextStyle(fontSize:11)),
+              ],
+            ),
+          ),
+        const SizedBox(height: 10),
         if (_trackPath != null) ...[
           const SizedBox(height: 12),
           _section(
