@@ -307,7 +307,8 @@ class _StudioPainter extends CustomPainter {
             canvas.drawLine(Offset(x + 5, yy),
                 Offset(x + 5, yy - 27),
                 Paint()..color = accent..strokeWidth = 1.3);
-            if (cell.length <= 4) {
+            if (cell.length <= 4 &&
+                !_isBeamed(measure.cells, cell)) {
               canvas.drawLine(Offset(x + 5, yy - 27),
                   Offset(x + 13, yy - 19),
                   Paint()..color = accent..strokeWidth = 1.6);
@@ -400,6 +401,22 @@ class _StudioPainter extends CustomPainter {
         Offset(cursorX, size.height - 10), cursor);
     canvas.drawCircle(Offset(cursorX, 23), 5,
         Paint()..color = const Color(0xFF0E9B7A));
+  }
+
+  bool _isBeamed(List<ScoreCell> cells, ScoreCell note) {
+    if (note.isRest || note.tieStart || note.tieStop || note.length > 4) {
+      return false;
+    }
+    for (final other in cells) {
+      if (identical(other, note) || other.isRest || other.length > 4 ||
+          other.tieStart || other.tieStop) continue;
+      final sameBeat = other.start ~/ ticksPerQuarter ==
+          note.start ~/ ticksPerQuarter;
+      if (!sameBeat) continue;
+      if (note.start + note.length == other.start ||
+          other.start + other.length == note.start) return true;
+    }
+    return false;
   }
 
   double _noteY(int midi, double bottom, bool bass, bool drums) {
