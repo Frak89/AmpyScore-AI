@@ -54,7 +54,9 @@ class StereoVocalReducer {
       final side = (left - right) * 0.5;
       // Mix between the unprocessed source and L-R cancellation.
       final baseL = side + bass;
-      final baseR = -side + bass;
+      // Duplicate side to both output channels so phone speakers or
+      // mono Bluetooth devices do not cancel the entire instrumental.
+      final baseR = side + bass;
       final resultL = left * (1 - amount) + baseL * amount;
       final resultR = right * (1 - amount) + baseR * amount;
       totalInput += left * left + right * right;
@@ -73,7 +75,7 @@ class StereoVocalReducer {
       bass += alpha * (center - bass);
       final side = (left - right) * 0.5;
       final l = (left * (1 - amount) + (side + bass) * amount) * finalGain;
-      final r = (right * (1 - amount) + (-side + bass) * amount) * finalGain;
+      final r = (right * (1 - amount) + (side + bass) * amount) * finalGain;
       double limit(double v) {
         final x = v.abs();
         final excess = x - .90;
