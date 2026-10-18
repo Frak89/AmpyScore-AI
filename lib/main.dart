@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +19,8 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
+import 'audio/live_capture_store.dart';
+import 'audio/live_transcription.dart';
 import 'audio/wav_window_reader.dart';
 import 'audio/midi_engine.dart';
 import 'audio/playback_tuning.dart';
@@ -101,6 +104,14 @@ class _StudioPageState extends State<StudioPage> {
   final _apiKey = TextEditingController();
   final _songQuery = TextEditingController();
   Timer? _transportTimer;
+  Timer? _liveTimer;
+  StreamSubscription<Uint8List>? _liveSubscription;
+  LiveCaptureStore? _liveCapture;
+  Future<void> _captureWrites = Future<void>.value();
+  final LiveTranscriptionAccumulator _liveAccumulator =
+      LiveTranscriptionAccumulator();
+  bool _liveProcessing = false;
+  String? _liveCaptureError;
 
   List<DetectedNote> _notes = const [];
   bool _multitrackMode = true;
@@ -183,6 +194,11 @@ class _StudioPageState extends State<StudioPage> {
   @override
   void dispose() {
     _transportTimer?.cancel();
+    _liveTimer?.cancel();
+    unawaited(_liveSubscription?.cancel() ?? Future<void>.value());
+    if (_recording) unawaited(_recorder.stop());
+    if (_liveCapture != null) unawaited(_captureWrites.then((_) =>
+        _liveCapture!.finish()).then((_) {}));
     _speedDebounce?.cancel();
     _apiKey.dispose();
     _songQuery.dispose();
@@ -301,45 +317,153 @@ class _StudioPageState extends State<StudioPage> {
     _buildScoreAfterAnalysis();
   });
 
+  /// The main app workflow: microphone → progressive multistaff →
+  /// completed Studio transcription after stopping. The microphone streams
+  /// PCM16 directly to an on-disk WAV, not a RAM recording buffer.
   Future<void> _toggleRecording() => _execute(() async {
-        if (_recording) {
-          final path = await _recorder.stop();
-          if (mounted) setState(() => _recording = false);
-          if (path == null) {
-            throw StateError('Nessuna registrazione prodotta.');
-          }
-          await _load(path, 'Registrazione microfono');
-          await _analyseInternal();
-          _buildScoreAfterAnalysis();
-          return;
-        }
-        if (!await _recorder.hasPermission()) {
-          throw StateError('Permesso microfono negato.');
-        }
-        await _pauseTransport();
-        await _player.stop();
-        await _midiPlayer.stop();
-        await _notePlayer.stop();
-        await _stemPlayer.stop();
-        final dir = await getApplicationDocumentsDirectory();
-        final path =
-            '${dir.path}/rec_${DateTime.now().millisecondsSinceEpoch}.wav';
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-            autoGain: false,
-          ),
-          path: path,
-        );
-        if (mounted) {
-          setState(() {
-            _recording = true;
-            _status = 'Registrazione in corso. Premi Stop e analizza.';
-          });
-        }
+    if (_recording) {
+      await _stopLiveRecording();
+    } else {
+      await _startLiveRecording();
+    }
+  });
+
+  Future<void> _startLiveRecording() async {
+    if (!await _recorder.hasPermission()) {
+      throw StateError('Consenti l’accesso al microfono per ascoltare.');
+    }
+    await _pauseTransport();
+    await _stemPlayer.stop();
+    await _notePlayer.stop();
+    final folder = await getApplicationDocumentsDirectory();
+    final output = File('${folder.path}/AmpyScore_live_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    final store = await LiveCaptureStore.open(output);
+    try {
+      final stream = await _recorder.startStream(const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+        autoGain: false,
+        echoCancel: false,
+        noiseSuppress: false,
+      ));
+      _liveCapture = store;
+      _liveAccumulator.clear();
+      _liveCaptureError = null;
+      _captureWrites = Future<void>.value();
+      _liveSubscription = stream.listen((bytes) {
+        // Serializes disk writes regardless of stream burst rate.
+        _captureWrites = _captureWrites.then((_) => store.append(bytes))
+            .catchError((Object error) {
+          _liveCaptureError = error.toString();
+          if (mounted) setState(() =>
+            _status = 'Registrazione: ${_liveCaptureError!}');
+        });
+      }, onError: (Object error) {
+        _liveCaptureError = error.toString();
+        if (mounted) setState(() =>
+          _status = 'Microfono: ${_liveCaptureError!}');
       });
+      if (!mounted) return;
+      setState(() {
+        _recording = true;
+        _multitrackMode = true;
+        _trackName = 'Ascolto dal microfono';
+        _parts = [];
+        _notes = [];
+        _score = null;
+        _rhythm = null;
+        _status = 'Ascolto in corso';
+        _analysisDuration = 0;
+        _pageIndex = 0;
+      });
+      _liveTimer?.cancel();
+      _liveTimer = Timer.periodic(
+        const Duration(milliseconds: 2300),
+        (_) => unawaited(_refreshLivePreview()),
+      );
+    } catch (_) {
+      await store.finish();
+      await output.delete();
+      rethrow;
+    }
+  }
+
+  Future<void> _refreshLivePreview() async {
+    final store = _liveCapture;
+    if (!_recording || _liveProcessing || store == null) return;
+    _liveProcessing = true;
+    try {
+      await _captureWrites;
+      final total = await store.snapshot();
+      final processed = _liveAccumulator.processedUntil;
+      if (total - processed < 2.2) return;
+      final beginning = math.max(0.0, processed - .32);
+      final cutoff = math.max(processed, total - .20);
+      final reader = await WavWindowReader.open(store.file);
+      final window = await reader.window(beginning, total - beginning);
+      if (window.isEmpty) return;
+      final result = await compute(MultiTrackAnalyzer.analyze, window);
+      if (!_recording || !mounted) return;
+      _liveAccumulator.add(
+        result, startSeconds: beginning, endSeconds: cutoff);
+      final parts = _liveAccumulator.parts;
+      if (parts.isEmpty) {
+        setState(() => _status = 'Ascolto · ${_clock(total)}');
+        return;
+      }
+      final rhythm = RhythmAnalyzer.estimate(parts);
+      final bpm = _tempoOverride ?? rhythm.bpm;
+      final primary = parts.where((p) =>
+          p.family == InstrumentFamily.melody);
+      final chosen = primary.isNotEmpty ? primary.first : parts.first;
+      final project = ScoreProject.fromTranscription(parts, bpm,
+        beatsPerBar: _beatsPerBar,
+        minimumDurationSeconds: total,
+      );
+      setState(() {
+        _parts = parts;
+        _notes = chosen.notes;
+        _selectedFamily = chosen.family;
+        _rhythm = rhythm;
+        _score = project;
+        _analysisDuration = total;
+        _cursor = Duration(milliseconds: (total * 1000).round());
+        _status = 'Ascolto · ${_clock(total)} · '
+            '${_liveAccumulator.noteCount} note provvisorie';
+      });
+    } catch (error) {
+      if (mounted) setState(() =>
+        _status = 'Analisi Live: $error');
+    } finally {
+      _liveProcessing = false;
+    }
+  }
+
+  Future<void> _stopLiveRecording() async {
+    _liveTimer?.cancel();
+    _liveTimer = null;
+    await _liveSubscription?.cancel();
+    _liveSubscription = null;
+    await _recorder.stop();
+    await _captureWrites;
+    final store = _liveCapture;
+    _liveCapture = null;
+    if (store == null) throw StateError('Nessun audio registrato.');
+    final path = await store.finish();
+    if (mounted) setState(() => _recording = false);
+    if (store.frames < 16000) {
+      throw StateError('Registra almeno un secondo di musica.');
+    }
+    if (_liveCaptureError != null) {
+      throw StateError('Errore durante la cattura: $_liveCaptureError');
+    }
+    await _load(path.path, 'Registrazione dal microfono');
+    await _analyseInternal();
+    _buildScoreAfterAnalysis();
+    if (mounted) setState(() => _pageIndex = 1);
+  }
 
   /// Complete song analysis, bounded 16-second PCM chunks in worker isolates.
   Future<void> _analyseInternal() async {
