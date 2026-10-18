@@ -138,6 +138,7 @@ class _StudioPageState extends State<StudioPage> {
   bool _busy = false;
   bool _playing = false;
   bool _midiReady = false;
+  bool _originalUsesFallback = false;
   double _analysisProgress = 0;
   double _analysisDuration = 0;
   int _beatsPerBar = 4;
@@ -207,11 +208,13 @@ class _StudioPageState extends State<StudioPage> {
     _metronomeReady = false;
     try {
       await _player.setFilePath(path);
+      _originalUsesFallback = false;
     } catch (_) {
       // Some platform codecs decode successfully but cannot be played
       // directly by the native media player; use the local PCM fallback.
       if (analysisPath == null || analysisPath == path) rethrow;
       await _player.setFilePath(analysisPath);
+      _originalUsesFallback = true;
     }
     if (!mounted) return;
     setState(() {
@@ -1291,6 +1294,14 @@ class _StudioPageState extends State<StudioPage> {
           ),
         ]),
         const SizedBox(height: 8),
+        if (_originalUsesFallback)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 10),
+            child: Text('Codec originale non supportato dal dispositivo: '
+              'riproduzione PCM mono di compatibilità.',
+              style: TextStyle(color: Color(0xFFEF9C57),
+                  fontSize: 12)),
+          ),
         if (score == null)
           _section(
             icon: Icons.music_note,
