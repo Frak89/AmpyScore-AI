@@ -1,0 +1,52 @@
+name: Android signed release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+      - name: Generate native platforms
+        run: flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
+      - name: Configure permissions
+        run: python3 tool/configure_platforms.py
+      - name: Setup stable signing
+        env:
+          AMPY_KEYSTORE_BASE64: ${{ secrets.AMPY_RELEASE_KEYSTORE_BASE64 }}
+          AMPY_KEYSTORE_PASSWORD: ${{ secrets.AMPY_RELEASE_STORE_PASSWORD }}
+          AMPY_KEY_ALIAS: ${{ secrets.AMPY_RELEASE_KEY_ALIAS }}
+          AMPY_KEY_PASSWORD: ${{ secrets.AMPY_RELEASE_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$AMPY_KEYSTORE_BASE64" || { echo "Configure GitHub release signing secrets first."; exit 1; }
+          test -n "$AMPY_KEYSTORE_PASSWORD"
+          test -n "$AMPY_KEY_ALIAS"
+          test -n "$AMPY_KEY_PASSWORD"
+          echo "$AMPY_KEYSTORE_BASE64" | base64 --decode > android/app/ampyscore-release.jks
+          echo "AMPY_KEYSTORE_PATH=ampyscore-release.jks" >> "$GITHUB_ENV"
+          python3 tool/configure_release_signing.py
+          # The keystore belongs to android/app/ and is never committed.
+      - name: Analyze and test
+        run: |
+          flutter pub get
+          flutter analyze --no-fatal-infos
+          flutter test
+      - name: Signed release APK
+        run: flutter build apk --release
+      - name: Publish immutable tagged APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME"             "build/app/outputs/flutter-apk/app-release.apk#AmpyScore-AI-$GITHUB_REF_NAME.apk"             --verify-tag --title "AmpyScore AI $GITHUB_REF_NAME"             --generate-notes
