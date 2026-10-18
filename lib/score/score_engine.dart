@@ -102,7 +102,7 @@ class ScoreProject {
       notes.where((n) => n.family == family).toList()
         ..sort((a, b) => a.start.compareTo(b.start));
 
-  double get durationSeconds => (barCount * ticksPerBar) * 60 / (bpm * ticksPerQuarter);
+  double get durationSeconds => (barCount * barTicks) * 60 / (bpm * ticksPerQuarter);
 
   int get barCount {
     final maxEnd = notes.fold<int>(0, (v, note) => math.max(v, note.end));
@@ -171,7 +171,7 @@ class ScoreProject {
       total += math.max(0, math.min(note.end, end) -
           math.max(note.start, begin));
     }
-    return total > ticksPerBar;
+    return total > barTicks;
   }
 
   List<ScoreMeasure> measures(InstrumentFamily family) {
