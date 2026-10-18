@@ -28,7 +28,9 @@ void main() {
             positionSeconds: 0.1, tone: PaperTone.ivory))),
     );
     expect(tester.takeException(), isNull);
-    await tester.longPress(find.byType(StudioScore));
+    await tester.longPressAt(
+      tester.getTopLeft(find.byType(StudioScore)) + const Offset(190, 64),
+    );
     await tester.pump();
     expect(find.byIcon(Icons.zoom_in), findsOneWidget);
     expect(tester.takeException(), isNull);
