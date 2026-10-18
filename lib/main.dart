@@ -155,7 +155,14 @@ class _StudioPageState extends State<StudioPage> {
     await _midiPlayer.stop();
     await _notePlayer.stop();
     await _stemPlayer.stop();
-    await _player.setFilePath(path);
+    try {
+      await _player.setFilePath(path);
+    } catch (_) {
+      // Some platform codecs decode successfully but cannot be played
+      // directly by the native media player; use the local PCM fallback.
+      if (analysisPath == null || analysisPath == path) rethrow;
+      await _player.setFilePath(analysisPath);
+    }
     if (!mounted) return;
     setState(() {
       _trackPath = path;
