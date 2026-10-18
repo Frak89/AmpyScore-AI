@@ -643,7 +643,7 @@ class _StudioPageState extends State<StudioPage> {
 
   void _selectFamily(InstrumentFamily family) {
     if (_parts.isEmpty || _busy) return;
-    final match = _parts.where((part) => part.family == family);
+    final match = _editedParts().where((part) => part.family == family);
     if (match.isEmpty) return;
     setState(() {
       _selectedFamily = family;
@@ -659,7 +659,8 @@ class _StudioPageState extends State<StudioPage> {
         final oldCursor = _cursor;
         await _pauseTransport();
         await _midiPlayer.stop();
-        await _renderMultiPreview(_parts, _durationSeconds);
+        await _renderMultiPreview(_editedParts(),
+            _score?.durationSeconds ?? _durationSeconds);
         await _seekTransport(oldCursor);
         if (resume && previousMode != null && mounted) {
           setState(() {
