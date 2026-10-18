@@ -1,6 +1,16 @@
-# AmpyScore Studio 0.9 — tempo variabile, MIDI SoundFont, partitura sincronizzata
+# AmpyScore Studio 1.0 — tempo variabile, MIDI SoundFont, partitura sincronizzata
 
 Applicazione Flutter gratuita e open source (MIT), elaborazione audio musicale locale. **Il motore di trascrizione non è ancora un modello AI di source separation**: i registri basso/armonia/melodia/percussioni sono stime da frequenze, perciò le note non saranno fedeli a un brano jazz polifonico complesso come *Take Five*. Non confondere qualità del sintetizzatore MIDI (timbrica) con accuratezza delle note estratte.
+
+
+## Novità v1.0 — PDF, strumenti GM completi, esportazione tracce
+
+- **Esporta PDF:** spartito multipagina A4 orizzontale in grafica vettoriale con tutti i righi, battute, note/pause, metro e BPM; bianco o seppia come impostato in Opzioni. Usa il menu nativo di condivisione/stampa; le funzioni avanzate di impaginazione musicale (corretta grafica di legature, gruppi di note, alterazioni armoniche) rimangono **preferibilmente gestite attraverso l'export MusicXML** e software di notazione.
+- **Tutti i timbri MIDI GM1:** menu con 128 programmi, 0–127 (pianoforti, organi, chitarre, bassi, archi, fiati, pad e FX); percussioni sul canale MIDI 10 con 47 strumenti a note 35–81, selezione "automatico" oppure sostituzione esplicita con un suono percussivo. La scelta non aumenta la precisione del rilevamento.
+- **Spessore cromatico +1 semitono:** funzione **facoltativa e disattivata per impostazione predefinita**. Aggiunge una seconda voce MIDI a un semitono sopra, a circa il 16% di velocity. Può introdurre dissonanze e non migliora la risoluzione/campionamento del suono. Non modifica percussioni.
+- **Buffer sperimentale 4096:** scelta addizionale SoundFont, con maggiore latenza teorica. Non migliora la registrazione originale.
+- **Esportazione WAV completa:** "Base senza voce" tramite attenuazione del centro stereo, "Solo voce stimata" tramite filtro sul centro stereo di banda media, più singoli registri basso, armonia, melodia e percussioni via filtri di frequenza. L'app produce ogni brano in streaming su disco e lo invia al menu condivisione Android/iOS, senza copiare WAV multi-centinaia MB in memoria. **Queste sono estrazioni sperimentali, non stem separati da reti neurali.** 
+- **MIDI singola parte** dal menu Tracce: esporta uno Standard MIDI File di quella voce.
 
 
 ## Novità v0.9 — pratica musicale
