@@ -102,6 +102,20 @@ class _StudioPageState extends State<StudioPage> {
   FocusStem _focusStem = FocusStem.vocalCandidate;
   String? _stemPath;
   String? _lastMixPath;
+  final Map<InstrumentFamily, int> _gmPrograms = {
+    InstrumentFamily.bass: 32,
+    InstrumentFamily.harmony: 0,
+    InstrumentFamily.melody: 65,
+  };
+  static const Map<int, String> _gmNames = {
+    0: 'Pianoforte', 1: 'Pianoforte brillante',
+    24: 'Chitarra nylon', 25: 'Chitarra acustica',
+    26: 'Chitarra elettrica', 32: 'Contrabbasso',
+    33: 'Basso elettrico', 40: 'Violino',
+    48: 'Archi', 56: 'Tromba', 57: 'Trombone',
+    65: 'Sax contralto', 66: 'Sax tenore',
+    73: 'Flauto', 80: 'Sintetizzatore',
+  };
   final Map<InstrumentFamily, double> _partGains = {
     for (final family in InstrumentFamily.values) family: 0.90,
   };
@@ -457,6 +471,14 @@ class _StudioPageState extends State<StudioPage> {
     });
   }
 
+  List<InstrumentPart> _withPrograms(List<InstrumentPart> parts) => [
+    for (final p in parts)
+      InstrumentPart(
+        family: p.family, notes: p.notes, confidence: p.confidence,
+        programOverride: _gmPrograms[p.family] ?? p.programOverride,
+      ),
+  ];
+
   List<InstrumentPart> _editedParts() {
     final score = _score;
     if (score == null) return _parts;
@@ -465,6 +487,7 @@ class _StudioPageState extends State<StudioPage> {
         InstrumentPart(
           family: part.family,
           confidence: part.confidence,
+          programOverride: _gmPrograms[part.family] ?? part.programOverride,
           notes: [
             for (final item in score.forFamily(part.family))
               if (!item.isRest) DetectedNote(
@@ -572,7 +595,7 @@ class _StudioPageState extends State<StudioPage> {
       _soundfontId ??= await _synth.loadSoundfontAsset(
         assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
       await _synth.loadMidiData(
-        data: MultiTrackMidi.export(parts, bpm: bpm,
+        data: MultiTrackMidi.export(_withPrograms(parts), bpm: bpm,
           beatsPerBar: _beatsPerBar, gains: _partGains),
         sfId: _soundfontId!,
       );
@@ -1055,11 +1078,11 @@ class _StudioPageState extends State<StudioPage> {
         if (_notes.isEmpty) return;
         final score = _score;
     final bytes = score != null
-        ? MultiTrackMidi.export(_editedParts(), bpm: score.bpm,
+        ? MultiTrackMidi.export(_withPrograms(_editedParts()), bpm: score.bpm,
             beatsPerBar: _beatsPerBar)
         : _parts.isEmpty
             ? MidiEngine.exportMidi(_notes)
-            : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120,
+            : MultiTrackMidi.export(_withPrograms(_parts), bpm: _rhythm?.bpm ?? 120,
             beatsPerBar: _beatsPerBar);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
@@ -1508,6 +1531,35 @@ class _StudioPageState extends State<StudioPage> {
             onGainDone: () => unawaited(_remix()),
           ),
         ),
+        if (_parts.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (final part in _parts)
+            if (!part.percussion)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Expanded(child: Text(part.name,
+                    maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  const SizedBox(width: 8),
+                  DropdownButton<int>(
+                    value: _gmPrograms[part.family] ?? part.midiProgram,
+                    items: [
+                      for (final entry in _gmNames.entries)
+                        DropdownMenuItem<int>(
+                          value: entry.key,
+                          child: Text(entry.value,
+                            style: const TextStyle(fontSize: 12)),
+                        ),
+                    ],
+                    onChanged: _busy ? null : (program) {
+                      if (program == null) return;
+                      setState(() => _gmPrograms[part.family] = program);
+                      unawaited(_remix());
+                    },
+                  ),
+                ]),
+              ),
+        ],
         const SizedBox(height: 12),
         ExpansionTile(
           title: const Text('Filtri audio sperimentali'),
