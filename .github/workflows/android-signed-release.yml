@@ -22,6 +22,8 @@ jobs:
         run: flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
       - name: Configure permissions
         run: python3 tool/configure_platforms.py
+      - name: Bundle offline GeneralUser GS SoundFont
+        run: python3 tool/fetch_soundfont.py
       - name: Setup stable signing
         env:
           AMPY_KEYSTORE_BASE64: ${{ secrets.AMPY_RELEASE_KEYSTORE_BASE64 }}
