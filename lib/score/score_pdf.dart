@@ -9,7 +9,7 @@ import '../audio/multitrack_engine.dart';
 /// Intended for review/printing; professional engraving remains MusicXML.
 class ScorePdf {
   static const barsPerSystem = 4;
-  static const systemsPerPage = 2;
+  static const minimumSystemsPerPage = 2;
 
   static Future<Uint8List> render(ScoreProject score, {
     String title = 'AmpyScore Studio',
@@ -20,6 +20,9 @@ class ScorePdf {
     final paper = sepia ? PdfColor.fromInt(0xfff9f2e5) : PdfColors.white;
     final name = title.replaceAll(RegExp(r'[^\w .-]'), ' ').trim();
     final totalSystems = (score.barCount / barsPerSystem).ceil();
+    final systemHeight = score.parts.length * 54 + 37;
+    final systemsPerPage = math.max(minimumSystemsPerPage,
+        math.min(6, (480 / systemHeight).floor()));
     final pageCount = (totalSystems / systemsPerPage).ceil();
     for (var page = 0; page < pageCount; page++) {
       final systems = <pw.Widget>[];
@@ -127,7 +130,7 @@ class ScorePdf {
         // map chromatic pitch to diatonic position for vector drawing.
         final base = bass ? 43 : 64;
         final step = _diatonic(pitch) - _diatonic(base);
-        final y=(top+28)-step*3.5;
+        final y=top+step*3.5;
         final constrainedY=y.clamp(2.0,size.y-3.0);
         // Round/elliptic notehead with stem and optional flag.
         g..setColor(ink)
