@@ -64,3 +64,23 @@ class SongLookup {
     }
   }
 }
+
+enum SheetLibrary {
+  eightNotes('8notes', '8notes.com'),
+  museScore('MuseScore', 'musescore.com'),
+  imslp('IMSLP', 'imslp.org'),
+  flat('Flat', 'flat.io'),
+  scoreExchange('ScoreExchange', 'scoreexchange.com'),
+  openScore('OpenScore', 'openscore.cc');
+
+  const SheetLibrary(this.label, this.domain);
+  final String label;
+  final String domain;
+
+  Uri searchFor(String title) {
+    final safe = title.trim().replaceAll(RegExp(r'\\s+'), ' ');
+    return Uri.https('www.google.com', '/search', {
+      'q': '$safe spartito partitura site:$domain',
+    });
+  }
+}
