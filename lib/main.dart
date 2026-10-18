@@ -763,62 +763,59 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _findSongOnline() async {
     if (_searching) return;
     setState(() => _searching = true);
+    List<SongCandidate> matches = const [];
     try {
-      final candidates = await SongLookup.find(
-        '${_songQuery.text.trim()}.mp3');
+      // MusicBrainz is only metadata search; score libraries open externally.
+      try {
+        matches = await SongLookup.find('${_songQuery.text.trim()}.mp3');
+      } catch (_) {
+        // Metadata service unavailable: public score searches still work.
+      }
       if (!mounted) return;
-      setState(() => _songResults = candidates);
+      _songResults = matches;
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
+          title: const Text('Cerca partiture'),
           content: SizedBox(
-            width: 460,
-            child: candidates.isEmpty
-              ? const Text('Nessuna corrispondenza trovata.')
-              : ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final song in candidates)
+            width: 470,
+            child: SingleChildScrollView(child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(spacing: 7, runSpacing: 7, children: [
+                  for (final lib in SheetLibrary.values)
+                    ActionChip(
+                      label: Text(lib.label),
+                      avatar: const Icon(Icons.open_in_new, size: 16),
+                      onPressed: () => unawaited(launchUrl(
+                        lib.searchFor(_songQuery.text),
+                        mode: LaunchMode.externalApplication)),
+                    ),
+                ]),
+                if (matches.isNotEmpty) ...[
+                  const Divider(height: 25),
+                  const Text('Registrazioni trovate'),
+                  for (final song in matches.take(6))
                     ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
                       title: Text(song.title),
                       subtitle: Text(song.artist),
-                      trailing: PopupMenuButton<String>(
-                        tooltip: 'Apri riferimenti online',
-                        icon: const Icon(Icons.open_in_new),
-                        onSelected: (choice) {
-                          final url = choice == 'info'
-                              ? song.url
-                              : Uri.https('www.google.com', '/search', {
-                                  'q': '${song.title} ${song.artist} '
-                                      'spartito MusicXML',
-                                });
-                          unawaited(launchUrl(url,
-                              mode: LaunchMode.externalApplication));
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'info',
-                              child: Text('Dettagli brano')),
-                          PopupMenuItem(value: 'score',
-                              child: Text('Cerca spartito')),
-                        ],
-                      ),
+                      trailing: const Icon(Icons.open_in_new),
+                      onTap: () => unawaited(launchUrl(song.url,
+                        mode: LaunchMode.externalApplication)),
                     ),
                 ],
-              ),
+              ],
+            )),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context),
-                child: const Text('Chiudi')),
+              child: const Text('Chiudi')),
           ],
         ),
       );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ricerca: $error')),
-        );
-      }
     } finally {
       if (mounted) setState(() => _searching = false);
     }
