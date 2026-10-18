@@ -400,8 +400,13 @@ class _StudioPageState extends State<StudioPage> {
     if (!_recording || _liveProcessing || store == null) return;
     _liveProcessing = true;
     try {
+      // Serialize header snapshots with incoming PCM writes so the RIFF
+      // header cannot race with a microphone callback's file position.
+      _captureWrites = _captureWrites.then((_) async {
+        await store.snapshot();
+      });
       await _captureWrites;
-      final total = await store.snapshot();
+      final total = store.durationSeconds;
       final processed = _liveAccumulator.processedUntil;
       if (total - processed < 2.2) return;
       final beginning = math.max(0.0, processed - .32);
