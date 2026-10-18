@@ -636,9 +636,26 @@ class _StudioPageState extends State<StudioPage> {
                     ListTile(
                       title: Text(song.title),
                       subtitle: Text(song.artist),
-                      trailing: const Icon(Icons.open_in_new),
-                      onTap: () => launchUrl(song.url,
-                          mode: LaunchMode.externalApplication),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Apri riferimenti online',
+                        icon: const Icon(Icons.open_in_new),
+                        onSelected: (choice) {
+                          final url = choice == 'info'
+                              ? song.url
+                              : Uri.https('www.google.com', '/search', {
+                                  'q': '${song.title} ${song.artist} '
+                                      'spartito MusicXML',
+                                });
+                          unawaited(launchUrl(url,
+                              mode: LaunchMode.externalApplication));
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'info',
+                              child: Text('Dettagli brano')),
+                          PopupMenuItem(value: 'score',
+                              child: Text('Cerca spartito')),
+                        ],
+                      ),
                     ),
                 ],
               ),
