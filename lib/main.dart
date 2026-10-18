@@ -8,9 +8,12 @@ import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
+import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
 import 'audio/midi_engine.dart';
+import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
@@ -21,6 +24,8 @@ import 'score/note_lab.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 import 'services/local_audio_import.dart';
+import 'services/app_updates.dart';
+import 'services/song_lookup.dart';
 
 void main() => runApp(const AmpyScoreApp());
 
@@ -70,7 +75,9 @@ class _StudioPageState extends State<StudioPage> {
   final _midiPlayer = AudioPlayer(); // Synthesized preview WAV.
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
   final _stemPlayer = AudioPlayer(); // Optional spectral focus WAV.
+  final _metronomePlayer = AudioPlayer();
   final _apiKey = TextEditingController();
+  final _songQuery = TextEditingController();
   Timer? _transportTimer;
 
   List<DetectedNote> _notes = const [];
@@ -97,6 +104,15 @@ class _StudioPageState extends State<StudioPage> {
   String _trackName = 'Nessuna traccia';
   String _status = 'Importa una canzone o registra una melodia.';
   String? _assistantAnswer;
+  bool _metronomeEnabled = false;
+  bool _metronomeReady = false;
+  int _metronomeBpm = 120;
+  int _metronomeSubdivisions = 1;
+  double _metronomeVolume = .56;
+  bool _forceScoreFullScreen = false;
+  bool _immersive = false;
+  bool _searching = false;
+  List<SongCandidate> _songResults = const [];
   bool _recording = false;
   bool _busy = false;
   bool _playing = false;
@@ -124,11 +140,16 @@ class _StudioPageState extends State<StudioPage> {
   void dispose() {
     _transportTimer?.cancel();
     _apiKey.dispose();
+    _songQuery.dispose();
+    if (_immersive) {
+      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    }
     _recorder.dispose();
     _player.dispose();
     _midiPlayer.dispose();
     _notePlayer.dispose();
     _stemPlayer.dispose();
+    _metronomePlayer.dispose();
     super.dispose();
   }
 
@@ -155,6 +176,8 @@ class _StudioPageState extends State<StudioPage> {
     await _midiPlayer.stop();
     await _notePlayer.stop();
     await _stemPlayer.stop();
+    await _metronomePlayer.stop();
+    _metronomeReady = false;
     try {
       await _player.setFilePath(path);
     } catch (_) {
@@ -168,6 +191,8 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _songQuery.text = SongLookup.filenameTitle(name) ?? '';
+      _songResults = const [];
       _notes = const [];
       _parts = const [];
       _rhythm = null;
@@ -343,6 +368,8 @@ class _StudioPageState extends State<StudioPage> {
     ];
     final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
     final project = ScoreProject.fromTranscription(parts, bpm);
+    _metronomeBpm = project.bpm;
+    _metronomeReady = false;
     if (mounted) {
       setState(() {
         _score = project;
@@ -360,11 +387,11 @@ class _StudioPageState extends State<StudioPage> {
     setState(() {
       _notes = [
         for (final item in lane)
-          DetectedNote(
+          if (!item.isRest) DetectedNote(
             midi: item.midi,
             startSeconds: project.timeOf(item),
             endSeconds: project.timeOf(item) +
-                item.length * 60 / (project.bpm * 4),
+                item.length * 60 / (project.bpm * ticksPerQuarter),
             confidence: item.evidence,
           ),
       ];
@@ -381,11 +408,11 @@ class _StudioPageState extends State<StudioPage> {
           confidence: part.confidence,
           notes: [
             for (final item in score.forFamily(part.family))
-              DetectedNote(
+              if (!item.isRest) DetectedNote(
                 midi: item.midi,
                 startSeconds: score.timeOf(item),
                 endSeconds: score.timeOf(item) +
-                    item.length * 60 / (score.bpm * 4),
+                    item.length * 60 / (score.bpm * ticksPerQuarter),
                 confidence: item.evidence,
               ),
           ],
@@ -497,6 +524,159 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  Future<void> _prepareMetronome() async {
+    if (!_metronomeEnabled || _trackPath == null) return;
+    await _metronomePlayer.stop();
+    final settings = MetronomeSettings(
+      bpm: _metronomeBpm,
+      subdivisions: _metronomeSubdivisions,
+      durationSeconds: _durationSeconds + .3,
+    );
+    final bytes = await compute(MetronomeSynth.render, settings);
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/metro_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    await file.writeAsBytes(bytes, flush: true);
+    await _metronomePlayer.setFilePath(file.path);
+    await _metronomePlayer.setVolume(_metronomeVolume);
+    _metronomeReady = true;
+  }
+
+  Future<void> _configureMetronome({
+    bool? enabled,
+    int? bpm,
+    int? subdivisions,
+  }) async {
+    if (_busy) return;
+    final previousMode = _playing ? _mode : null;
+    final oldPosition = _cursor;
+    if (previousMode != null) await _pauseTransport();
+    if (mounted) {
+      setState(() {
+        if (enabled != null) _metronomeEnabled = enabled;
+        if (bpm != null) _metronomeBpm = bpm;
+        if (subdivisions != null) _metronomeSubdivisions = subdivisions;
+        _metronomeReady = false;
+      });
+    }
+    if (_metronomeEnabled && _trackPath != null) {
+      await _prepareMetronome();
+      await _metronomePlayer.seek(oldPosition);
+    } else {
+      await _metronomePlayer.pause();
+    }
+    if (previousMode != null) {
+      await _togglePlaybackMode(previousMode);
+    }
+  }
+
+  Future<void> _jumpToNote(ScoreNote note) async {
+    if (_busy || _trackPath == null) return;
+    final mode = _mode ??
+        (_midiReady ? _PlaybackMode.both : _PlaybackMode.original);
+    await _pauseTransport();
+    if (mounted) setState(() {
+      _selectedNoteId = note.id;
+      _selectedFamily = note.family;
+    });
+    await _seekTransport(Duration(
+      microseconds: (_score!.timeOf(note) * 1000000).round(),
+    ));
+    await _togglePlaybackMode(mode);
+  }
+
+  Future<void> _checkForUpdates() => _execute(() async {
+    final update = await AppUpdates.check();
+    if (!mounted) return;
+    final target = update?.url ?? AppUpdates.releases;
+    final title = update == null
+        ? 'Nessuna release pubblicata'
+        : update.hasNewVersion
+            ? 'Disponibile ${update.version}'
+            : 'Versione aggiornata';
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(update == null
+          ? 'Puoi verificare le release GitHub.'
+          : 'Le nuove versioni si installano dal browser. '
+            'Per aggiornare mantenendo i dati serve la stessa firma APK.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false),
+              child: const Text('Chiudi')),
+          FilledButton(onPressed: () => Navigator.pop(context, true),
+              child: const Text('Apri GitHub')),
+        ],
+      ),
+    );
+    if (open == true) await AppUpdates.openReleases(url: target);
+  });
+
+  Future<void> _findSongOnline() async {
+    if (_searching) return;
+    setState(() => _searching = true);
+    try {
+      final candidates = await SongLookup.find(
+        '${_songQuery.text.trim()}.mp3');
+      if (!mounted) return;
+      setState(() => _songResults = candidates);
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
+          content: SizedBox(
+            width: 460,
+            child: candidates.isEmpty
+              ? const Text('Nessuna corrispondenza trovata.')
+              : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final song in candidates)
+                    ListTile(
+                      title: Text(song.title),
+                      subtitle: Text(song.artist),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Apri riferimenti online',
+                        icon: const Icon(Icons.open_in_new),
+                        onSelected: (choice) {
+                          final url = choice == 'info'
+                              ? song.url
+                              : Uri.https('www.google.com', '/search', {
+                                  'q': '${song.title} ${song.artist} '
+                                      'spartito MusicXML',
+                                });
+                          unawaited(launchUrl(url,
+                              mode: LaunchMode.externalApplication));
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'info',
+                              child: Text('Dettagli brano')),
+                          PopupMenuItem(value: 'score',
+                              child: Text('Cerca spartito')),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context),
+                child: const Text('Chiudi')),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ricerca: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
   Future<void> _analyse() => _execute(() async {
     await _analyseInternal();
     _buildScoreAfterAnalysis();
@@ -529,6 +709,7 @@ class _StudioPageState extends State<StudioPage> {
       });
       unawaited(_midiPlayer.pause());
       unawaited(_player.pause());
+      unawaited(_metronomePlayer.pause());
       return;
     }
 
@@ -543,6 +724,12 @@ class _StudioPageState extends State<StudioPage> {
         unawaited(_midiPlayer.seek(time).whenComplete(() {
           _resyncing = false;
         }));
+      }
+    }
+    if (_metronomeEnabled && _metronomeReady) {
+      final drift = (time - _metronomePlayer.position).inMilliseconds.abs();
+      if (drift > 140 && !_resyncing) {
+        unawaited(_metronomePlayer.seek(time));
       }
     }
     final index = _noteAt(time.inMicroseconds / 1000000.0);
@@ -562,7 +749,7 @@ class _StudioPageState extends State<StudioPage> {
         _mode = null;
       });
     }
-    await Future.wait([_player.pause(), _midiPlayer.pause()]);
+    await Future.wait([_player.pause(), _midiPlayer.pause(), _metronomePlayer.pause()]);
   }
 
   Future<void> _seekTransport(Duration cursor) async {
@@ -576,8 +763,9 @@ class _StudioPageState extends State<StudioPage> {
     }
     try {
       await _player.seek(newTime);
-      if (_midiReady) {
-        await _midiPlayer.seek(newTime);
+      if (_midiReady) await _midiPlayer.seek(newTime);
+      if (_metronomeEnabled && _metronomeReady) {
+        await _metronomePlayer.seek(newTime);
       }
     } catch (error) {
       if (mounted) setState(() => _status = 'Posizionamento: $error');
@@ -594,6 +782,9 @@ class _StudioPageState extends State<StudioPage> {
       }
       await _pauseTransport();
       await _notePlayer.stop();
+      if (_metronomeEnabled && !_metronomeReady) {
+        await _prepareMetronome();
+      }
       var newTime = _cursor;
       if (newTime.inMilliseconds >= (_durationSeconds * 1000).floor() - 80) {
         newTime = Duration.zero;
@@ -609,6 +800,9 @@ class _StudioPageState extends State<StudioPage> {
       }
       if (requested != _PlaybackMode.original) {
         unawaited(_midiPlayer.play());
+      }
+      if (_metronomeEnabled && _metronomeReady) {
+        unawaited(_metronomePlayer.play());
       }
     } catch (error) {
       if (mounted) setState(() {
@@ -739,6 +933,70 @@ class _StudioPageState extends State<StudioPage> {
   @override
   Widget build(BuildContext context) {
     final ready = !_busy && !_recording && _trackPath != null;
+    final scoreOnly = _score != null &&
+        (_forceScoreFullScreen ||
+            (MediaQuery.orientationOf(context) == Orientation.landscape
+              && _playing));
+    if (scoreOnly != _immersive) {
+      _immersive = scoreOnly;
+      WidgetsBinding.instance.addPostFrameCallback((_) async {
+        if (!mounted) return;
+        await SystemChrome.setEnabledSystemUIMode(scoreOnly
+            ? SystemUiMode.immersiveSticky
+            : SystemUiMode.edgeToEdge);
+      });
+    }
+    if (scoreOnly) {
+      return Scaffold(
+        backgroundColor: _paperTone == PaperTone.sepia
+            ? const Color(0xFFF2E5CA) : const Color(0xFFFAFAF8),
+        body: SafeArea(
+          child: Stack(children: [
+            Positioned.fill(
+              child: StudioScore(
+                project: _score!,
+                positionSeconds: _cursor.inMicroseconds / 1000000.0,
+                tone: _paperTone,
+                activeNoteId: _selectedNoteId,
+                fullScreen: true,
+                onFullScreen: () => setState(() =>
+                    _forceScoreFullScreen = false),
+                onTapNote: (note) => unawaited(_jumpToNote(note)),
+              ),
+            ),
+            Positioned(
+              top: 8, right: 8,
+              child: DecoratedBox(
+                decoration: BoxDecoration(
+                  color: const Color(0xEE1B2B30),
+                  borderRadius: BorderRadius.circular(13),
+                ),
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  IconButton(
+                    tooltip: _playing ? 'Pausa' : 'Riprendi',
+                    color: Colors.white,
+                    onPressed: _playing ? _pauseTransport :
+                        () => _togglePlaybackMode(
+                          _midiReady ? _PlaybackMode.both :
+                          _PlaybackMode.original),
+                    icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
+                  ),
+                  IconButton(
+                    tooltip: 'Esci dallo schermo intero',
+                    color: Colors.white,
+                    onPressed: () {
+                      unawaited(_pauseTransport());
+                      setState(() => _forceScoreFullScreen = false);
+                    },
+                    icon: const Icon(Icons.fullscreen_exit),
+                  ),
+                ]),
+              ),
+            ),
+          ]),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF101820),
@@ -749,27 +1007,16 @@ class _StudioPageState extends State<StudioPage> {
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20)),
         ]),
         actions: [
-          PopupMenuButton<bool>(
-            tooltip: 'Modalità di analisi',
-            icon: const Icon(Icons.tune),
-            onSelected: (mode) {
-              if (_busy || _recording) return;
-              setState(() => _multitrackMode = mode);
-              if (_trackPath != null) unawaited(_analyse());
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(
-                value: true, child: Text('Analisi multitraccia')),
-              PopupMenuItem(
-                value: false, child: Text('Analisi melodia')),
-            ],
+          IconButton(
+            icon: const Icon(Icons.system_update_alt),
+            tooltip: 'Aggiornamenti',
+            onPressed: _busy ? null : _checkForUpdates,
           ),
         ],
       ),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _pageIndex,
-        onDestinationSelected: (value) =>
-            setState(() => _pageIndex = value),
+        onDestinationSelected: (value) => setState(() => _pageIndex = value),
         destinations: const [
           NavigationDestination(icon: Icon(Icons.library_music_outlined),
               selectedIcon: Icon(Icons.library_music), label: 'Studio'),
@@ -777,31 +1024,30 @@ class _StudioPageState extends State<StudioPage> {
               selectedIcon: Icon(Icons.edit_note), label: 'NoteLab'),
           NavigationDestination(icon: Icon(Icons.tune_outlined),
               selectedIcon: Icon(Icons.tune), label: 'Tracce'),
+          NavigationDestination(icon: Icon(Icons.settings_outlined),
+              selectedIcon: Icon(Icons.settings), label: 'Opzioni'),
         ],
       ),
       body: SafeArea(
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
           children: [
-            _importToolbar(),
+            if (_pageIndex == 0) _importToolbar(),
             if (_busy) ...[
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               const LinearProgressIndicator(minHeight: 3),
             ],
-            if (!_busy && _trackPath != null) ...[
+            if (!_busy && _trackPath != null && _pageIndex == 0) ...[
               const SizedBox(height: 8),
-              Text(
-                _status,
-                style: const TextStyle(
-                    fontSize: 12, color: Color(0xFFA2B6C1)),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-              ),
+              Text(_status,
+                style: const TextStyle(fontSize: 12, color: Color(0xFFA2B6C1)),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
             ],
-            const SizedBox(height: 18),
+            const SizedBox(height: 12),
             if (_pageIndex == 0) _studioView(ready),
             if (_pageIndex == 1) _noteLabView(),
             if (_pageIndex == 2) _tracksView(),
+            if (_pageIndex == 3) _settingsView(),
           ],
         ),
       ),
@@ -823,32 +1069,7 @@ class _StudioPageState extends State<StudioPage> {
             icon: Icon(_recording ? Icons.stop_circle : Icons.mic),
             label: Text(_recording ? 'Stop' : 'Registra'),
           ),
-          PopupMenuButton<String>(
-            tooltip: 'Demo',
-            enabled: !_busy && !_recording,
-            onSelected: (value) {
-              if (value == 'ensemble') {
-                unawaited(_multiDemo());
-              } else {
-                unawaited(_demo());
-              }
-            },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'ensemble',
-                  child: Text('Demo multistrumento')),
-              PopupMenuItem(value: 'melody',
-                  child: Text('Demo melodia')),
-            ],
-            child: const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-              child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Icon(Icons.music_note_outlined),
-                SizedBox(width: 6),
-                Text('Demo'),
-                Icon(Icons.arrow_drop_down),
-              ]),
-            ),
-          ),
+
         ]),
         if (_trackPath != null) ...[
           const SizedBox(height: 9),
@@ -902,14 +1123,9 @@ class _StudioPageState extends State<StudioPage> {
             positionSeconds: _cursor.inMicroseconds / 1000000.0,
             tone: _paperTone,
             activeNoteId: _selectedNoteId,
-            onTapNote: (note) {
-              _selectFamily(note.family);
-              setState(() => _selectedNoteId = note.id);
-              final index = _notes.indexWhere((item) =>
-                  item.midi == note.midi &&
-                  (item.startSeconds - score.timeOf(note)).abs() < 0.25);
-              if (index >= 0) unawaited(_playOneNote(index));
-            },
+            onFullScreen: () =>
+                setState(() => _forceScoreFullScreen = true),
+            onTapNote: (note) => unawaited(_jumpToNote(note)),
           ),
           const SizedBox(height: 12),
           Row(children: [
@@ -958,6 +1174,13 @@ class _StudioPageState extends State<StudioPage> {
             onPressed: _playing ? _pauseTransport : null,
             icon: const Icon(Icons.pause),
           ),
+          IconButton.filledTonal(
+            tooltip: 'Ascolta singola nota',
+            onPressed: !_busy && _activeIndex >= 0 &&
+                    _activeIndex < _notes.length
+                ? () => _playOneNote(_activeIndex) : null,
+            icon: const Icon(Icons.music_note),
+          ),
         ]),
         const SizedBox(height: 13),
         _volumeRow(
@@ -997,16 +1220,14 @@ class _StudioPageState extends State<StudioPage> {
               onPressed: _analyse,
               child: const Text('Rianalizza'),
             ),
-        ]),
-        if (score != null)
-          const Padding(
-            padding: EdgeInsets.only(top: 8),
-            child: Text(
-              'Trascrizione sperimentale · analisi dei primi 40 s.',
-              style: TextStyle(fontSize: 11,
-                  color: Color(0xFF93A4B1)),
+          if (score != null)
+            OutlinedButton.icon(
+              icon: const Icon(Icons.travel_explore),
+              onPressed: _searching ? null : _openSongSearch,
+              label: const Text('Confronta online'),
             ),
-          ),
+        ]),
+
       ],
     );
   }
@@ -1026,50 +1247,76 @@ class _StudioPageState extends State<StudioPage> {
 
   Widget _noteLabView() {
     final score = _score;
-    if (score == null) {
-      return const Center(child: Padding(
+    if (score == null) return const Center(
+      child: Padding(
         padding: EdgeInsets.all(20),
-        child: Text('Importa un brano per usare NoteLab.'),
-      ));
-    }
-    return _section(
-      icon: Icons.edit_note,
-      title: 'NoteLab',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('Tempo · ${_tempoSlider.round()} BPM'),
-          Slider(
-            value: _tempoSlider, min: 50, max: 220, divisions: 170,
-            label: '${_tempoSlider.round()}',
-            onChanged: _busy ? null : (v) =>
-                setState(() => _tempoSlider = v),
-          ),
-          Wrap(spacing: 8, runSpacing: 8, children: [
-            FilledButton.tonalIcon(
-              onPressed: _busy ? null : _retranscribeAtBpm,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Ritrascrivi'),
-            ),
-            FilledButton.tonalIcon(
-              onPressed: _busy ? null : _rebuildMidiFromScore,
-              icon: const Icon(Icons.piano),
-              label: const Text('Aggiorna MIDI'),
-            ),
-          ]),
-          const SizedBox(height: 14),
-          NoteLab(
-            score: score,
-            selectedFamily: _selectedFamily,
-            selectedNoteId: _selectedNoteId,
-            onSelect: (note) => setState(() {
-              _selectedNoteId = note.id;
-              _selectedFamily = note.family;
-            }),
-            onChanged: _onScoreEdit,
-          ),
-        ],
+        child: Text('Apri un brano per usare NoteLab.'),
       ),
+    );
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Expanded(child: Text('NoteLab',
+              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold))),
+          Text('${_tempoSlider.round()} BPM'),
+          IconButton(
+            tooltip: 'Schermo intero',
+            onPressed: () => setState(() => _forceScoreFullScreen = true),
+            icon: const Icon(Icons.fullscreen),
+          ),
+        ]),
+        StudioScore(
+          project: score,
+          positionSeconds: _cursor.inMicroseconds / 1000000,
+          tone: _paperTone,
+          activeNoteId: _selectedNoteId,
+          onFullScreen: () => setState(() => _forceScoreFullScreen = true),
+          onTapNote: (note) {
+            _selectFamily(note.family);
+            setState(() => _selectedNoteId = note.id);
+          },
+        ),
+        const SizedBox(height: 14),
+        _section(
+          icon: Icons.edit_note,
+          title: 'Modifica nota',
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              NoteLab(
+                score: score,
+                selectedFamily: _selectedFamily,
+                selectedNoteId: _selectedNoteId,
+                onSelect: (note) => setState(() {
+                  _selectedNoteId = note.id;
+                  _selectedFamily = note.family;
+                }),
+                onChanged: _onScoreEdit,
+              ),
+              const SizedBox(height: 12),
+              Wrap(spacing: 8, runSpacing: 8, children: [
+                FilledButton.tonalIcon(
+                  onPressed: _busy ? null : _rebuildMidiFromScore,
+                  icon: const Icon(Icons.piano),
+                  label: const Text('Aggiorna MIDI'),
+                ),
+                FilledButton.tonalIcon(
+                  onPressed: _busy ? null : _retranscribeAtBpm,
+                  icon: const Icon(Icons.refresh),
+                  label: const Text('Ritrascrivi'),
+                ),
+              ]),
+              Slider(
+                value: _tempoSlider, min: 50, max: 220, divisions: 170,
+                label: '${_tempoSlider.round()} BPM',
+                onChanged: _busy ? null :
+                    (v) => setState(() => _tempoSlider = v),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -1157,6 +1404,131 @@ class _StudioPageState extends State<StudioPage> {
       ],
     );
   }
+
+  Future<void> _openSongSearch() async {
+    final input = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Cerca partitura online'),
+        content: TextField(
+          controller: _songQuery,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Titolo o artista', border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Annulla')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, _songQuery.text.trim()),
+            child: const Text('Cerca')),
+        ],
+      ),
+    );
+    if (input == null || input.length < 4 || !mounted) return;
+    _songQuery.text = input;
+    await _findSongOnline();
+  }
+
+  Widget _settingsView() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _section(
+        icon: Icons.tune,
+        title: 'Visualizzazione',
+        child: Column(children: [
+          SegmentedButton<PaperTone>(
+            segments: const [
+              ButtonSegment(value: PaperTone.ivory, label: Text('Bianco')),
+              ButtonSegment(value: PaperTone.sepia, label: Text('Seppia')),
+            ],
+            selected: {_paperTone},
+            onSelectionChanged: (set) =>
+                setState(() => _paperTone = set.first),
+          ),
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            title: const Text('Multitraccia'),
+            value: _multitrackMode,
+            onChanged: _busy ? null : (value) {
+              setState(() => _multitrackMode = value);
+              if (_trackPath != null) unawaited(_analyse());
+            },
+          ),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.av_timer,
+        title: 'Metronomo',
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          SwitchListTile.adaptive(
+            contentPadding: EdgeInsets.zero,
+            value: _metronomeEnabled,
+            title: const Text('Attivo durante la riproduzione'),
+            onChanged: _busy ? null :
+                (value) => unawaited(
+                    _configureMetronome(enabled: value)),
+          ),
+          Text('Tempo: $_metronomeBpm BPM'),
+          Slider(
+            min: 40, max: 240, divisions: 200,
+            value: _metronomeBpm.toDouble(),
+            label: '$_metronomeBpm BPM',
+            onChanged: _busy ? null :
+                (v) => setState(() => _metronomeBpm = v.round()),
+            onChangeEnd: _busy ? null :
+                (v) => unawaited(
+                  _configureMetronome(bpm: v.round())),
+          ),
+          Wrap(spacing: 8, children: [
+            for (final subdivision in [1, 2, 4, 8])
+              ChoiceChip(
+                selected: _metronomeSubdivisions == subdivision,
+                label: Text(switch (subdivision) {
+                  1 => '1/4', 2 => '1/8', 4 => '1/16', _ => '1/32'
+                }),
+                onSelected: _busy ? null : (_) => unawaited(
+                  _configureMetronome(subdivisions: subdivision)),
+              ),
+          ]),
+          const Text('Volume'),
+          Slider(
+            value: _metronomeVolume,
+            onChanged: (value) {
+              setState(() => _metronomeVolume = value);
+              unawaited(_metronomePlayer.setVolume(value));
+            },
+          ),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.music_note,
+        title: 'Esempi',
+        child: Wrap(spacing: 8, runSpacing: 8, children: [
+          OutlinedButton(
+            onPressed: _busy ? null : _multiDemo,
+            child: const Text('Demo multitraccia')),
+          OutlinedButton(
+            onPressed: _busy ? null : _demo,
+            child: const Text('Demo melodia')),
+        ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.system_update_alt,
+        title: 'Aggiornamenti',
+        child: FilledButton.tonalIcon(
+          onPressed: _busy ? null : _checkForUpdates,
+          icon: const Icon(Icons.update),
+          label: const Text('Controlla su GitHub'),
+        ),
+      ),
+    ],
+  );
+
 
   Widget _section({
     required IconData icon,
