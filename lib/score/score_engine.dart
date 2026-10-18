@@ -297,8 +297,10 @@ class MusicXmlWriter {
               out.write('<pitch>${pitch.$1}${pitch.$2}</pitch>');
             }
           }
-          out.write('<duration>${cell.length * midiTicksPerThirtySecond}'
-              '</duration><type>${_type(cell.length)}</type>');
+          out.write('<duration>${cell.length * midiTicksPerThirtySecond}</duration>');
+          if (cell.tieStop) out.write('<tie type="stop"/>');
+          if (cell.tieStart) out.write('<tie type="start"/>');
+          out.write('<type>${_type(cell.length)}</type>');
           if ([3, 6, 12, 24].contains(cell.length)) out.write('<dot/>');
           if (!cell.isRest) {
             final beam = _beam(bar.cells, i, 4);
@@ -306,8 +308,6 @@ class MusicXmlWriter {
             final second = _beam(bar.cells, i, 2);
             if (second != null) out.write('<beam number="2">$second</beam>');
           }
-          if (cell.tieStop) out.write('<tie type="stop"/>');
-          if (cell.tieStart) out.write('<tie type="start"/>');
           if (cell.tieStop || cell.tieStart) {
             out.write('<notations>');
             if (cell.tieStop) out.write('<tied type="stop"/>');
