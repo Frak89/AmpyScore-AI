@@ -1,17 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
+import 'audio/wav_window_reader.dart';
 import 'audio/midi_engine.dart';
 import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
@@ -21,6 +24,7 @@ import 'audio/stem_extractor.dart';
 import 'score/score_engine.dart';
 import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
+import 'score/reference_score.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 import 'services/local_audio_import.dart';
@@ -72,7 +76,10 @@ class StudioPage extends StatefulWidget {
 class _StudioPageState extends State<StudioPage> {
   final _recorder = AudioRecorder();
   final _player = AudioPlayer(); // Original recording.
-  final _midiPlayer = AudioPlayer(); // Synthesized preview WAV.
+  final _midiPlayer = AudioPlayer(); // Muted audio clock when SF2 is active.
+  final _synth = MidiPro();
+  int? _soundfontId;
+  bool _soundfontReady = false;
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
   final _stemPlayer = AudioPlayer(); // Optional spectral focus WAV.
   final _metronomePlayer = AudioPlayer();
@@ -95,6 +102,20 @@ class _StudioPageState extends State<StudioPage> {
   FocusStem _focusStem = FocusStem.vocalCandidate;
   String? _stemPath;
   String? _lastMixPath;
+  final Map<InstrumentFamily, int> _gmPrograms = {
+    InstrumentFamily.bass: 32,
+    InstrumentFamily.harmony: 0,
+    InstrumentFamily.melody: 65,
+  };
+  static const Map<int, String> _gmNames = {
+    0: 'Pianoforte', 1: 'Pianoforte brillante',
+    24: 'Chitarra nylon', 25: 'Chitarra acustica',
+    26: 'Chitarra elettrica', 32: 'Contrabbasso',
+    33: 'Basso elettrico', 40: 'Violino',
+    48: 'Archi', 56: 'Tromba', 57: 'Trombone',
+    65: 'Sax contralto', 66: 'Sax tenore',
+    73: 'Flauto', 80: 'Sintetizzatore',
+  };
   final Map<InstrumentFamily, double> _partGains = {
     for (final family in InstrumentFamily.values) family: 0.90,
   };
@@ -117,12 +138,16 @@ class _StudioPageState extends State<StudioPage> {
   bool _busy = false;
   bool _playing = false;
   bool _midiReady = false;
+  bool _originalUsesFallback = false;
+  double _analysisProgress = 0;
+  double _analysisDuration = 0;
+  int _beatsPerBar = 4;
   bool _resyncing = false;
   _PlaybackMode? _mode;
   Duration _cursor = Duration.zero;
   DateTime _lastResync = DateTime.fromMillisecondsSinceEpoch(0);
   int _activeIndex = -1;
-  double _originalVolume = 0.70;
+  double _originalVolume = 1.0;
   double _midiVolume = 0.65;
 
   @override
@@ -147,6 +172,7 @@ class _StudioPageState extends State<StudioPage> {
     _recorder.dispose();
     _player.dispose();
     _midiPlayer.dispose();
+    if (_synth.isInitialized) unawaited(_synth.dispose());
     _notePlayer.dispose();
     _stemPlayer.dispose();
     _metronomePlayer.dispose();
@@ -174,23 +200,29 @@ class _StudioPageState extends State<StudioPage> {
     await _pauseTransport();
     await _player.stop();
     await _midiPlayer.stop();
+    if (_soundfontReady) await _synth.stopMidi();
+    _soundfontReady = false;
     await _notePlayer.stop();
     await _stemPlayer.stop();
     await _metronomePlayer.stop();
     _metronomeReady = false;
     try {
       await _player.setFilePath(path);
+      _originalUsesFallback = false;
     } catch (_) {
       // Some platform codecs decode successfully but cannot be played
       // directly by the native media player; use the local PCM fallback.
       if (analysisPath == null || analysisPath == path) rethrow;
       await _player.setFilePath(analysisPath);
+      _originalUsesFallback = true;
     }
     if (!mounted) return;
     setState(() {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _beatsPerBar = RegExp(r'take[ _-]?five|take[ _-]?5',
+          caseSensitive: false).hasMatch(name) ? 5 : 4;
       _songQuery.text = SongLookup.filenameTitle(name) ?? '';
       _songResults = const [];
       _notes = const [];
@@ -207,6 +239,10 @@ class _StudioPageState extends State<StudioPage> {
       _activeIndex = -1;
       _midiReady = false;
       _status = 'Brano pronto.';
+      _analysisProgress = 0;
+      _analysisDuration = 0;
+      _analysisProgress = 0;
+      _analysisDuration = 0;
     });
   }
 
@@ -281,81 +317,119 @@ class _StudioPageState extends State<StudioPage> {
         }
       });
 
+  /// Complete song analysis, bounded 16-second PCM chunks in worker isolates.
   Future<void> _analyseInternal() async {
     await _pauseTransport();
-    final path = _analysisPath;
-    if (path == null) {
-      throw StateError('Seleziona un brano o la demo.');
-    }
-    final bytes = await File(path).readAsBytes();
-    if (bytes.length > LocalAudioImport.maxDecodedBytes) {
-      throw const FormatException('Audio oltre il limite di analisi.');
-    }
-    if (mounted) setState(() => _status = 'Trascrizione in corso sul dispositivo...');
+    if (_analysisPath == null) throw StateError('Apri un brano.');
+    final reader = await WavWindowReader.open(File(_analysisPath!));
+    final duration = reader.durationSeconds;
+    if (duration <= 0) throw const FormatException('Audio vuoto.');
     await _midiPlayer.stop();
-    if (_multitrackMode) {
-      final result = await compute(MultiTrackAnalyzer.analyze, bytes);
-      final rhythm = RhythmAnalyzer.estimate(result.parts);
-      final wanted = result.parts.where(
-        (p) => p.family == InstrumentFamily.melody,
-      );
-      final selected = wanted.isNotEmpty
-          ? wanted.first
-          : (result.parts.isNotEmpty ? result.parts.first : null);
-      if (result.hasNotes) {
-        await _renderMultiPreview(result.parts, result.durationSeconds);
+    const windowSize = 16.0, overlap = 0.45;
+    final lanes = <InstrumentFamily, List<DetectedNote>>{};
+    final allMono = <DetectedNote>[];
+    var completed = 0.0;
+    for (var base = 0.0; base < duration; base += windowSize) {
+      final end = math.min(duration, base + windowSize);
+      final from = math.max(0.0, base - overlap);
+      final until = math.min(duration, end + overlap);
+      final bytes = await reader.window(from, until - from);
+      if (bytes.isEmpty) break;
+      if (_multitrackMode) {
+        final chunk = await compute(MultiTrackAnalyzer.analyze, bytes);
+        for (final part in chunk.parts) {
+          final items = lanes.putIfAbsent(part.family, () => []);
+          for (final note in part.notes) {
+            final first = math.max(base, from + note.startSeconds);
+            final last = math.min(end, from + note.endSeconds);
+            if (last <= first) continue;
+            if (items.isNotEmpty && items.last.midi == note.midi &&
+                first - items.last.endSeconds < .11) {
+              final previous = items.removeLast();
+              items.add(DetectedNote(midi: note.midi,
+                startSeconds: previous.startSeconds, endSeconds: last,
+                confidence: (previous.confidence + note.confidence) / 2));
+            } else {
+              items.add(DetectedNote(midi: note.midi,
+                startSeconds: first, endSeconds: last,
+                confidence: note.confidence));
+            }
+          }
+        }
+      } else {
+        final mono = await compute(WavTranscriber.transcribe, bytes);
+        for (final note in mono) {
+          final first = math.max(base, from + note.startSeconds);
+          final last = math.min(end, from + note.endSeconds);
+          if (last <= first) continue;
+          if (allMono.isNotEmpty && allMono.last.midi == note.midi &&
+              first - allMono.last.endSeconds < .11) {
+            final previous = allMono.removeLast();
+            allMono.add(DetectedNote(midi: note.midi,
+              startSeconds: previous.startSeconds, endSeconds: last,
+              confidence: (previous.confidence + note.confidence) / 2));
+          } else {
+            allMono.add(DetectedNote(midi: note.midi,
+              startSeconds: first, endSeconds: last,
+              confidence: note.confidence));
+          }
+        }
       }
-      await _player.seek(Duration.zero);
-      if (mounted) {
-        setState(() {
-          _parts = result.parts;
-          _selectedFamily = selected?.family;
-          _rhythm = rhythm;
-          _notes = selected?.notes ?? const [];
-          _assistantAnswer = null;
-          _midiReady = result.hasNotes;
-          _cursor = Duration.zero;
-          _activeIndex = -1;
-          _soloFamily = null;
-          _savedBeforeSolo = null;
-          _status = !result.hasNotes
-              ? 'Nessun registro rilevato. Prova la demo multistrumento.'
-              : '${result.parts.length} registri sonori stimati, '
-                'tempo ≈ ${rhythm.bpm} BPM. '
-                'Il metodo non identifica strumenti reali con certezza.';
-        });
-      }
-    } else {
-      final detected = await compute(WavTranscriber.transcribe, bytes);
-      if (detected.isNotEmpty) {
-        final rendered = await compute(MidiEngine.renderWav, detected);
-        final dir = await getApplicationDocumentsDirectory();
-        final preview = File('${dir.path}/ampyscore_midi_preview.wav');
-        await preview.writeAsBytes(rendered, flush: true);
-        await _midiPlayer.setFilePath(preview.path);
-        await _midiPlayer.setVolume(_midiVolume);
-      }
-      await _player.seek(Duration.zero);
-      final rhythm = RhythmAnalyzer.estimate([
-        InstrumentPart(family: InstrumentFamily.melody,
-            notes: detected, confidence: 0.6),
-      ]);
-      if (mounted) {
-        setState(() {
-          _notes = detected;
-          _parts = const [];
-          _rhythm = rhythm;
-          _selectedFamily = null;
-          _assistantAnswer = null;
-          _midiReady = detected.isNotEmpty;
-          _cursor = Duration.zero;
-          _activeIndex = -1;
-          _status = detected.isEmpty
-              ? 'Non ho trovato note abbastanza chiare.'
-              : '${detected.length} note. Tempo ≈ ${rhythm.bpm} BPM.';
-        });
-      }
+      completed = end;
+      if (mounted) setState(() {
+        _analysisProgress = end / duration;
+        _status = 'Analisi ${(end * 100 / duration).round()}% · '
+          '${_clock(end)} / ${_clock(duration)}';
+      });
     }
+    final parts = _multitrackMode
+      ? <InstrumentPart>[
+          for (final family in InstrumentFamily.values)
+            if ((lanes[family] ?? const <DetectedNote>[]).isNotEmpty)
+              InstrumentPart(family: family, notes: lanes[family]!,
+                confidence: switch(family) {
+                  InstrumentFamily.bass => .60,
+                  InstrumentFamily.harmony => .43,
+                  InstrumentFamily.melody => .54,
+                  InstrumentFamily.drums => .35,
+                }),
+        ]
+      : <InstrumentPart>[
+          InstrumentPart(family: InstrumentFamily.melody,
+            notes: allMono, confidence: .6),
+        ];
+    final wanted = parts.where((p) => p.family == InstrumentFamily.melody);
+    final selected = wanted.isNotEmpty ? wanted.first :
+        (parts.isNotEmpty ? parts.first : null);
+    final rhythm = RhythmAnalyzer.estimate(parts);
+    final allNotes = parts.any((p) => p.notes.isNotEmpty);
+    _analysisDuration = duration;
+    if (allNotes) {
+      await _renderMultiPreview(parts, duration);
+      await _loadSoundfontMidi(parts, rhythm.bpm);
+    }
+    await _player.seek(Duration.zero);
+    if (mounted) setState(() {
+      _parts = parts;
+      _notes = selected?.notes ?? const [];
+      _selectedFamily = selected?.family;
+      _rhythm = rhythm;
+      _midiReady = allNotes;
+      _assistantAnswer = null;
+      _cursor = Duration.zero;
+      _activeIndex = -1;
+      _soloFamily = null;
+      _savedBeforeSolo = null;
+      _analysisProgress = 1;
+      _status = allNotes
+          ? 'Trascritti ${_clock(completed)} · ≈ ${rhythm.bpm} BPM'
+          : 'Nessuna nota affidabile rilevata.';
+    });
+  }
+
+  static String _clock(double seconds) {
+    final n = seconds.floor();
+    return '${n ~/ 60}:${(n % 60).toString().padLeft(2, "0")}';
   }
 
   void _buildScoreAfterAnalysis() {
@@ -367,7 +441,9 @@ class _StudioPageState extends State<StudioPage> {
       ),
     ];
     final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
-    final project = ScoreProject.fromTranscription(parts, bpm);
+    final project = ScoreProject.fromTranscription(parts, bpm,
+        beatsPerBar: _beatsPerBar,
+        minimumDurationSeconds: _analysisDuration);
     _metronomeBpm = project.bpm;
     _metronomeReady = false;
     if (mounted) {
@@ -398,6 +474,14 @@ class _StudioPageState extends State<StudioPage> {
     });
   }
 
+  List<InstrumentPart> _withPrograms(List<InstrumentPart> parts) => [
+    for (final p in parts)
+      InstrumentPart(
+        family: p.family, notes: p.notes, confidence: p.confidence,
+        programOverride: _gmPrograms[p.family] ?? p.programOverride,
+      ),
+  ];
+
   List<InstrumentPart> _editedParts() {
     final score = _score;
     if (score == null) return _parts;
@@ -406,6 +490,7 @@ class _StudioPageState extends State<StudioPage> {
         InstrumentPart(
           family: part.family,
           confidence: part.confidence,
+          programOverride: _gmPrograms[part.family] ?? part.programOverride,
           notes: [
             for (final item in score.forFamily(part.family))
               if (!item.isRest) DetectedNote(
@@ -428,6 +513,7 @@ class _StudioPageState extends State<StudioPage> {
     await _midiPlayer.stop();
     final parts = _editedParts();
     await _renderMultiPreview(parts, score.durationSeconds);
+    await _loadSoundfontMidi(parts, score.bpm);
     await _seekTransport(oldCursor);
     if (mounted) {
       setState(() {
@@ -500,43 +586,130 @@ class _StudioPageState extends State<StudioPage> {
     }
   });
 
+  /// Writes a full-length PCM comparison to disk without allocating a
+  /// full-song Float32List or cutting the MIDI at 40 seconds.
+  Future<void> _loadSoundfontMidi(
+      List<InstrumentPart> parts, int bpm) async {
+    if (!Platform.isAndroid) return;
+    try {
+      if (!_synth.isInitialized) {
+        await _synth.init(sampleRate: 44100, polyphony: 128);
+      }
+      _soundfontId ??= await _synth.loadSoundfontAsset(
+        assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
+      await _synth.loadMidiData(
+        data: MultiTrackMidi.export(_withPrograms(parts), bpm: bpm,
+          beatsPerBar: _beatsPerBar, gains: _partGains),
+        sfId: _soundfontId!,
+      );
+      await _synth.setMasterGain(_midiVolume);
+      _soundfontReady = true;
+      await _midiPlayer.setVolume(0);
+    } catch (error) {
+      _soundfontReady = false;
+      await _midiPlayer.setVolume(_midiVolume);
+      if (mounted) setState(() =>
+        _status = 'SoundFont non disponibile; audio di riserva: $error');
+    }
+  }
+
   Future<void> _renderMultiPreview(
     List<InstrumentPart> parts, double duration,
   ) async {
-    final data = await compute(
-      MultiTrackMidi.renderMix,
-      TrackMix(parts, Map.of(_partGains), durationSeconds: duration),
-    );
     final dir = await getApplicationDocumentsDirectory();
     final newFile = File('${dir.path}/ampyscore_mix_'
         '${DateTime.now().microsecondsSinceEpoch}.wav');
-    await newFile.writeAsBytes(data, flush: true);
+    final writer = await newFile.open(mode: FileMode.write);
+    var written = 0;
+    Uint8List? header;
+    try {
+      const segmentSeconds = 12.0;
+      // Reserve WAV header first; write PCM bytes sequentially.
+      await writer.writeFrom(Uint8List(44));
+      for (var start = 0.0; start < duration; start += segmentSeconds) {
+        final seconds = math.min(segmentSeconds, duration - start);
+        final segmentParts = <InstrumentPart>[
+          for (final part in parts)
+            InstrumentPart(
+              family: part.family, confidence: part.confidence,
+              notes: [
+                for (final note in part.notes)
+                  if (note.endSeconds > start &&
+                      note.startSeconds < start + seconds)
+                    DetectedNote(
+                      midi: note.midi,
+                      startSeconds: math.max(0, note.startSeconds - start),
+                      endSeconds: math.min(seconds, note.endSeconds - start),
+                      confidence: note.confidence),
+              ],
+            ),
+        ];
+        final wav = await compute(
+          MultiTrackMidi.renderMix,
+          TrackMix(segmentParts, Map.of(_partGains),
+              durationSeconds: seconds),
+        );
+        header ??= Uint8List.fromList(wav.sublist(0, 44));
+        await writer.writeFrom(wav, 44);
+        written += wav.length - 44;
+      }
+      if (header == null) throw const FormatException('MIDI vuoto.');
+      final view = ByteData.sublistView(header);
+      view.setUint32(4, written + 36, Endian.little);
+      view.setUint32(40, written, Endian.little);
+      await writer.setPosition(0);
+      await writer.writeFrom(header);
+      await writer.flush();
+    } finally {
+      await writer.close();
+    }
     final old = _lastMixPath;
     await _midiPlayer.setFilePath(newFile.path);
-    await _midiPlayer.setVolume(_midiVolume);
+    await _midiPlayer.setVolume(_soundfontReady ? 0 : _midiVolume);
     _lastMixPath = newFile.path;
     if (old != null) {
-      try {
-        await File(old).delete();
-      } catch (_) {
-        // OS may still hold the last playback file.
-      }
+      try { await File(old).delete(); } catch (_) {}
     }
   }
 
   Future<void> _prepareMetronome() async {
     if (!_metronomeEnabled || _trackPath == null) return;
     await _metronomePlayer.stop();
-    final settings = MetronomeSettings(
-      bpm: _metronomeBpm,
-      subdivisions: _metronomeSubdivisions,
-      durationSeconds: _durationSeconds + .3,
-    );
-    final bytes = await compute(MetronomeSynth.render, settings);
     final dir = await getApplicationDocumentsDirectory();
     final file = File('${dir.path}/metro_'
         '${DateTime.now().microsecondsSinceEpoch}.wav');
-    await file.writeAsBytes(bytes, flush: true);
+    final writer = await file.open(mode: FileMode.write);
+    Uint8List? header;
+    var pcmLength = 0;
+    try {
+      await writer.writeFrom(Uint8List(44));
+      const segment = 12.0;
+      final duration = _durationSeconds + .3;
+      for (var start = 0.0; start < duration; start += segment) {
+        final chunk = await compute(
+          MetronomeSynth.render,
+          MetronomeSettings(
+            bpm: _metronomeBpm,
+            subdivisions: _metronomeSubdivisions,
+            durationSeconds: math.min(segment, duration - start),
+            beatsPerBar: _beatsPerBar,
+            startSeconds: start,
+          ),
+        );
+        header ??= Uint8List.fromList(chunk.sublist(0, 44));
+        await writer.writeFrom(chunk, 44);
+        pcmLength += chunk.length - 44;
+      }
+      if (header == null) return;
+      final view = ByteData.sublistView(header);
+      view.setUint32(4, pcmLength + 36, Endian.little);
+      view.setUint32(40, pcmLength, Endian.little);
+      await writer.setPosition(0);
+      await writer.writeFrom(header);
+      await writer.flush();
+    } finally {
+      await writer.close();
+    }
     await _metronomePlayer.setFilePath(file.path);
     await _metronomePlayer.setVolume(_metronomeVolume);
     _metronomeReady = true;
@@ -616,62 +789,59 @@ class _StudioPageState extends State<StudioPage> {
   Future<void> _findSongOnline() async {
     if (_searching) return;
     setState(() => _searching = true);
+    List<SongCandidate> matches = const [];
     try {
-      final candidates = await SongLookup.find(
-        '${_songQuery.text.trim()}.mp3');
+      // MusicBrainz is only metadata search; score libraries open externally.
+      try {
+        matches = await SongLookup.find('${_songQuery.text.trim()}.mp3');
+      } catch (_) {
+        // Metadata service unavailable: public score searches still work.
+      }
       if (!mounted) return;
-      setState(() => _songResults = candidates);
+      setState(() => _songResults = matches);
       await showDialog<void>(
         context: context,
         builder: (context) => AlertDialog(
-          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
+          title: Text('Cerca partiture · ${_songResults.length} brani'),
           content: SizedBox(
-            width: 460,
-            child: candidates.isEmpty
-              ? const Text('Nessuna corrispondenza trovata.')
-              : ListView(
-                shrinkWrap: true,
-                children: [
-                  for (final song in candidates)
+            width: 470,
+            child: SingleChildScrollView(child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Wrap(spacing: 7, runSpacing: 7, children: [
+                  for (final lib in SheetLibrary.values)
+                    ActionChip(
+                      label: Text(lib.label),
+                      avatar: const Icon(Icons.open_in_new, size: 16),
+                      onPressed: () => unawaited(launchUrl(
+                        lib.searchFor(_songQuery.text),
+                        mode: LaunchMode.externalApplication)),
+                    ),
+                ]),
+                if (matches.isNotEmpty) ...[
+                  const Divider(height: 25),
+                  const Text('Registrazioni trovate'),
+                  for (final song in matches.take(6))
                     ListTile(
+                      dense: true,
+                      contentPadding: EdgeInsets.zero,
                       title: Text(song.title),
                       subtitle: Text(song.artist),
-                      trailing: PopupMenuButton<String>(
-                        tooltip: 'Apri riferimenti online',
-                        icon: const Icon(Icons.open_in_new),
-                        onSelected: (choice) {
-                          final url = choice == 'info'
-                              ? song.url
-                              : Uri.https('www.google.com', '/search', {
-                                  'q': '${song.title} ${song.artist} '
-                                      'spartito MusicXML',
-                                });
-                          unawaited(launchUrl(url,
-                              mode: LaunchMode.externalApplication));
-                        },
-                        itemBuilder: (_) => const [
-                          PopupMenuItem(value: 'info',
-                              child: Text('Dettagli brano')),
-                          PopupMenuItem(value: 'score',
-                              child: Text('Cerca spartito')),
-                        ],
-                      ),
+                      trailing: const Icon(Icons.open_in_new),
+                      onTap: () => unawaited(launchUrl(song.url,
+                        mode: LaunchMode.externalApplication)),
                     ),
                 ],
-              ),
+              ],
+            )),
           ),
           actions: [
             TextButton(onPressed: () => Navigator.pop(context),
-                child: const Text('Chiudi')),
+              child: const Text('Chiudi')),
           ],
         ),
       );
-    } catch (error) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Ricerca: $error')),
-        );
-      }
     } finally {
       if (mounted) setState(() => _searching = false);
     }
@@ -687,9 +857,8 @@ class _StudioPageState extends State<StudioPage> {
     if (duration != null && duration.inMilliseconds > 0) {
       return duration.inMilliseconds / 1000.0;
     }
-    if (_notes.isNotEmpty) {
-      return _notes.last.endSeconds;
-    }
+    if (_analysisDuration > 0) return _analysisDuration;
+    if (_notes.isNotEmpty) return _notes.last.endSeconds;
     return 1;
   }
 
@@ -750,6 +919,7 @@ class _StudioPageState extends State<StudioPage> {
       });
     }
     await Future.wait([_player.pause(), _midiPlayer.pause(), _metronomePlayer.pause()]);
+    if (_soundfontReady) await _synth.pauseMidi();
   }
 
   Future<void> _seekTransport(Duration cursor) async {
@@ -764,6 +934,11 @@ class _StudioPageState extends State<StudioPage> {
     try {
       await _player.seek(newTime);
       if (_midiReady) await _midiPlayer.seek(newTime);
+      if (_soundfontReady) {
+        final tick = (newTime.inMicroseconds / 1000000 *
+            ((_score?.bpm ?? _rhythm?.bpm ?? 120) * 480 / 60)).round();
+        await _synth.seekMidi(tick);
+      }
       if (_metronomeEnabled && _metronomeReady) {
         await _metronomePlayer.seek(newTime);
       }
@@ -800,6 +975,7 @@ class _StudioPageState extends State<StudioPage> {
       }
       if (requested != _PlaybackMode.original) {
         unawaited(_midiPlayer.play());
+        if (_soundfontReady) await _synth.playMidi();
       }
       if (_metronomeEnabled && _metronomeReady) {
         unawaited(_metronomePlayer.play());
@@ -858,8 +1034,11 @@ class _StudioPageState extends State<StudioPage> {
         final oldCursor = _cursor;
         await _pauseTransport();
         await _midiPlayer.stop();
-        await _renderMultiPreview(_editedParts(),
+        final adjusted = _editedParts();
+        await _renderMultiPreview(adjusted,
             _score?.durationSeconds ?? _durationSeconds);
+        await _loadSoundfontMidi(adjusted,
+            _score?.bpm ?? _rhythm?.bpm ?? 120);
         await _seekTransport(oldCursor);
         if (resume && previousMode != null && mounted) {
           setState(() {
@@ -871,6 +1050,7 @@ class _StudioPageState extends State<StudioPage> {
           }
           if (previousMode != _PlaybackMode.original) {
             unawaited(_midiPlayer.play());
+            if (_soundfontReady) unawaited(_synth.playMidi());
           }
         }
       });
@@ -901,10 +1081,12 @@ class _StudioPageState extends State<StudioPage> {
         if (_notes.isEmpty) return;
         final score = _score;
     final bytes = score != null
-        ? MultiTrackMidi.export(_editedParts(), bpm: score.bpm)
+        ? MultiTrackMidi.export(_withPrograms(_editedParts()), bpm: score.bpm,
+            beatsPerBar: _beatsPerBar)
         : _parts.isEmpty
             ? MidiEngine.exportMidi(_notes)
-            : MultiTrackMidi.export(_parts, bpm: _rhythm?.bpm ?? 120);
+            : MultiTrackMidi.export(_withPrograms(_parts), bpm: _rhythm?.bpm ?? 120,
+            beatsPerBar: _beatsPerBar);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
           fileName: _parts.isEmpty
@@ -1035,7 +1217,8 @@ class _StudioPageState extends State<StudioPage> {
             if (_pageIndex == 0) _importToolbar(),
             if (_busy) ...[
               const SizedBox(height: 10),
-              const LinearProgressIndicator(minHeight: 3),
+              LinearProgressIndicator(minHeight: 3,
+                value: _analysisProgress > 0 ? _analysisProgress : null),
             ],
             if (!_busy && _trackPath != null && _pageIndex == 0) ...[
               const SizedBox(height: 8),
@@ -1111,6 +1294,14 @@ class _StudioPageState extends State<StudioPage> {
           ),
         ]),
         const SizedBox(height: 8),
+        if (_originalUsesFallback)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 10),
+            child: Text('Codec originale non supportato dal dispositivo: '
+              'riproduzione PCM mono di compatibilità.',
+              style: TextStyle(color: Color(0xFFEF9C57),
+                  fontSize: 12)),
+          ),
         if (score == null)
           _section(
             icon: Icons.music_note,
@@ -1198,7 +1389,8 @@ class _StudioPageState extends State<StudioPage> {
           Icons.piano,
           (value) {
             setState(() => _midiVolume = value);
-            unawaited(_midiPlayer.setVolume(value));
+            unawaited(_midiPlayer.setVolume(_soundfontReady ? 0 : value));
+            if (_soundfontReady) unawaited(_synth.setMasterGain(value));
             unawaited(_notePlayer.setVolume(value));
           },
         ),
@@ -1225,6 +1417,12 @@ class _StudioPageState extends State<StudioPage> {
               icon: const Icon(Icons.travel_explore),
               onPressed: _searching ? null : _openSongSearch,
               label: const Text('Confronta online'),
+            ),
+          if (score != null)
+            OutlinedButton.icon(
+              icon: const Icon(Icons.compare_arrows),
+              onPressed: _busy ? null : _compareReference,
+              label: const Text('Confronta MusicXML'),
             ),
         ]),
 
@@ -1344,6 +1542,35 @@ class _StudioPageState extends State<StudioPage> {
             onGainDone: () => unawaited(_remix()),
           ),
         ),
+        if (_parts.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          for (final part in _parts)
+            if (!part.percussion)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: Row(children: [
+                  Expanded(child: Text(part.name,
+                    maxLines: 1, overflow: TextOverflow.ellipsis)),
+                  const SizedBox(width: 8),
+                  DropdownButton<int>(
+                    value: _gmPrograms[part.family] ?? part.midiProgram,
+                    items: [
+                      for (final entry in _gmNames.entries)
+                        DropdownMenuItem<int>(
+                          value: entry.key,
+                          child: Text(entry.value,
+                            style: const TextStyle(fontSize: 12)),
+                        ),
+                    ],
+                    onChanged: _busy ? null : (program) {
+                      if (program == null) return;
+                      setState(() => _gmPrograms[part.family] = program);
+                      unawaited(_remix());
+                    },
+                  ),
+                ]),
+              ),
+        ],
         const SizedBox(height: 12),
         ExpansionTile(
           title: const Text('Filtri audio sperimentali'),
@@ -1405,6 +1632,53 @@ class _StudioPageState extends State<StudioPage> {
     );
   }
 
+  Future<void> _compareReference() => _execute(() async {
+    final project = _score;
+    if (project == null) return;
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['musicxml', 'xml'],
+    );
+    if (file == null) return;
+    final raw = await file.readAsBytes();
+    if (raw.length > 12 * 1024 * 1024) {
+      throw const FormatException('MusicXML troppo grande.');
+    }
+    final xml = utf8.decode(raw, allowMalformed: false);
+    final comparison = ReferenceScore.compare(project, xml);
+    if (!mounted) return;
+    final action = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Confronto MusicXML'),
+        content: Text('Coincidenze intonazione/attacco: '
+          '${(100 * comparison.f1).toStringAsFixed(1)}% F1.\n'
+          '${comparison.matched} note abbinate su '
+          '${comparison.transcribed} rilevate e '
+          '${comparison.reference} di riferimento.\n'
+          'Tolleranza: 1/16 (2 scatti di 1/32).'
+          '${comparison.meter == null ? "" : "\\nMetrica riferimento: ${comparison.meter}/4"}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Chiudi')),
+          if (comparison.meter != null && comparison.meter != _beatsPerBar &&
+              comparison.meter! >= 2 && comparison.meter! <= 12)
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text('Usa ${comparison.meter}/4')),
+        ],
+      ),
+    );
+    if (action == true) {
+      setState(() {
+        _beatsPerBar = comparison.meter!;
+        _score!.beatsPerBar = comparison.meter!;
+        _metronomeReady = false;
+      });
+    }
+  });
+
   Future<void> _openSongSearch() async {
     final input = await showDialog<String>(
       context: context,
@@ -1457,6 +1731,30 @@ class _StudioPageState extends State<StudioPage> {
             },
           ),
         ]),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.queue_music,
+        title: 'Tempo in chiave',
+        child: SegmentedButton<int>(
+          segments: const [
+            ButtonSegment(value: 3, label: Text('3/4')),
+            ButtonSegment(value: 4, label: Text('4/4')),
+            ButtonSegment(value: 5, label: Text('5/4')),
+            ButtonSegment(value: 6, label: Text('6/4')),
+          ],
+          selected: {_beatsPerBar},
+          onSelectionChanged: (value) {
+            setState(() {
+              _beatsPerBar = value.first;
+              _score?.beatsPerBar = value.first;
+              _metronomeReady = false;
+            });
+            if (_metronomeEnabled) {
+              unawaited(_configureMetronome());
+            }
+          },
+        ),
       ),
       const SizedBox(height: 12),
       _section(

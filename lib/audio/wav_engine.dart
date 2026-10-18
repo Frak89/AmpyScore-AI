@@ -69,7 +69,7 @@ class WavAudio {
     // A production version will replace this with an anti-aliasing resampler.
     final stride = math.max(1, (sampleRate / 8000).floor());
     final effectiveRate = sampleRate / stride;
-    final maxFrames = math.min(frames, sampleRate * 40);
+    final maxFrames = frames; // Call with a bounded WAV window.
     final out = <double>[];
     for (var i = 0; i < maxFrames; i += stride) {
       var value = 0.0;

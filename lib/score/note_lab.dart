@@ -69,7 +69,7 @@ class NoteLab extends StatelessWidget {
               ),
             ),
             Text(
-              'Batt. ${current.start ~/ ticksPerBar + 1}',
+              'Batt. ${current.start ~/ score.barTicks + 1}',
               style: TextStyle(color: theme.onSurfaceVariant),
             ),
             const SizedBox(width: 8),

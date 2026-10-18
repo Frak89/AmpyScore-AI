@@ -11,11 +11,13 @@ class InstrumentPart {
     required this.family,
     required this.notes,
     required this.confidence,
+    this.programOverride,
   });
 
   final InstrumentFamily family;
   final List<DetectedNote> notes;
   final double confidence;
+  final int? programOverride;
 
   String get id => family.name;
   String get name => switch (family) {
@@ -30,10 +32,10 @@ class InstrumentPart {
         InstrumentFamily.melody => 0,
         InstrumentFamily.drums => 9,
       };
-  int get midiProgram => switch (family) {
-        InstrumentFamily.bass => 33,
+  int get midiProgram => programOverride ?? switch (family) {
+        InstrumentFamily.bass => 32, // Acoustic bass.
         InstrumentFamily.harmony => 0,
-        InstrumentFamily.melody => 80,
+        InstrumentFamily.melody => 65, // General MIDI alto sax, changeable in Tracks.
         InstrumentFamily.drums => 0,
       };
   bool get percussion => family == InstrumentFamily.drums;
@@ -58,7 +60,7 @@ class MultiTrackAnalyzer {
   static const double _hopSeconds = 0.07;
 
   static MultiTrackResult analyze(Uint8List bytes) {
-    final audio = WavAudio.decode(bytes); // ~8k samples/s, <=40 s
+    final audio = WavAudio.decode(bytes); // One bounded PCM window supplied by the timeline analyzer.
     final rate = audio.sampleRate;
     final samples = audio.samples;
     final duration = samples.length / rate;
@@ -166,7 +168,7 @@ class MultiTrackAnalyzer {
 
     void close(double end) {
       if (active != null && count >= 2 && end - onset >= 0.14 &&
-          notes.length < 110) {
+          notes.length < 100000) {
         notes.add(DetectedNote(
           midi: active,
           startSeconds: math.max(0, onset - 0.04),

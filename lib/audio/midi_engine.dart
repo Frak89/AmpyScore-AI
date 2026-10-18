@@ -17,7 +17,7 @@ class MidiEngine {
       const _MidiEvent(0, -2, [0xFF, 0x51, 0x03, 0x07, 0xA1, 0x20]),
       const _MidiEvent(0, -1, [0xC0, 0]), // Acoustic piano, channel 1.
     ];
-    for (final note in notes.take(128)) {
+    for (final note in notes) {
       final start = math.max(0, (note.startSeconds * ticksPerSecond).round());
       final end = math.max(
         start + 1,
@@ -56,9 +56,9 @@ class MidiEngine {
       0,
       (old, n) => math.max(old, n.endSeconds),
     );
-    final seconds = (maxEnd + 0.15).clamp(0.5, 40.5);
+    final seconds = (maxEnd + 0.15).clamp(0.5, 30.0);
     final pcm = Float32List((seconds * sampleRate).ceil());
-    for (final note in notes.take(128)) {
+    for (final note in notes) {
       final begin = (math.max(0, note.startSeconds) * sampleRate).floor();
       final end = math.min(
         pcm.length,

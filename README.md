@@ -1,50 +1,48 @@
-# AmpyScore Studio 0.6
+# AmpyScore Studio 0.7 — intera canzone, GM SoundFont, partitura sincronizzata
 
-Studio musicale open source (MIT). Le funzioni di trascrizione locale rimangono **sperimentali**: i registri non equivalgono al riconoscimento affidabile degli strumenti, e le percentuali interne non sono misure d'accuratezza con spartiti di riferimento.
+Applicazione Flutter gratuita e open source (MIT), elaborazione audio musicale locale. **Il motore di trascrizione non è ancora un modello AI di source separation**: i registri basso/armonia/melodia/percussioni sono stime da frequenze, perciò le note non saranno fedeli a un brano jazz polifonico complesso come *Take Five*. Non confondere qualità del sintetizzatore MIDI (timbrica) con accuratezza delle note estratte.
 
-## Novità v0.6
+## Problemi corretti
 
-- **Studio:** spartito multirigo e riproduzione audio/MIDI. Tocca una nota per ripartire da quel punto. Ruota il dispositivo in orizzontale mentre la riproduzione è attiva per la partitura a schermo intero; puoi entrarci anche dai comandi dello spartito.
-- **Zoom:** pressione prolungata sul foglio per attivare pinch-to-zoom; da lì compaiono zoom −/+, fullscreen, chiusura.
-- **NoteLab:** lo **stesso spartito** dello Studio e la nota selezionata lampeggia fra colore originale e verde scuro. Con −/+ scegli durate progressive da **1/32** a **4/1**; puoi cambiare semitono, collocazione, selezionare pausa. La prima eliminazione converte la nota in pausa; la seconda rimuove quella pausa e sposta indietro le note successive. Eventuali silenzi residui vengono notati come pause automatiche, perché le battute 4/4 devono rimanere valide.
-- **Notazione:** gruppi di crome/semicrome contigue hanno aste collegate (beams), secondo la battuta. Le legature di valore compaiono soltanto quando una singola nota viene divisa, ad esempio attraversando una stanghetta, non automaticamente sulle note lunghe intere.
-- **Metronomo:** sintetizzato offline, segue la posizione della traccia; 40–240 BPM, 4/4 accentato, divisioni 1/4, 1/8, 1/16, 1/32 e volume indipendente, in **Opzioni**. Poiché il player è indipendente, il sincronismo non è garantito a livello di singolo campione.
-- **Opzioni:** esempi audio demo sono stati spostati dalle azioni principali. Testi della UI ridotti.
-- **Confronta online:** dopo analisi, ricerca volontaria su MusicBrainz per **titolo/metadata del file**, con collegamento alla ricerca esterna dello spartito. Nessuna impronta acustica, upload del file o confronto automatico MusicXML con una partitura online; il riconoscimento preciso per audio è ancora da sviluppare.
-- **App update:** pulsante nell'app per controllare su GitHub **Releases** se esiste una nuova versione stabile e aprirla nel browser. Non effettua download/installazione silenziosa.
+- **Analisi di durata completa:** eliminata la troncatura a 40 secondi per tutti gli audio. `WavWindowReader` legge soltanto finestre PCM da 16 secondi, con sovrapposizione, mediante operazioni su file. L'analisi prosegue automaticamente fino alla fine, mostrando progresso percentuale. Un brano importato viene riprodotto dal **file originale MP3/AAC/stereo**: la conversione PCM mono è solo per il riconoscimento note. Nei telefoni con codec non supportato resta un fallback WAV, qualitativamente peggiore e identificabile tramite errore/avviso.
+- **MIDI per tutta la durata:** eliminati limiti arbitrari di 110/128/200 eventi nelle tracce. Il renderer PCM di fallback e il metronomo scrivono audio completo a blocchi sul disco, senza un enorme buffer RAM.
+- **MIDI GM realmente campionato (Android):** `flutter_midi_pro 4.0.4` utilizza **FluidSynth**, 44,1 kHz e 128 voci, con **GeneralUser GS 2.0.3** e strumenti GM modificabili in **Tracce** (sax, chitarre, pianoforte, contrabbasso, archi, flauto, ecc.). La demo precedente con 3–4 onde sintetiche resta soltanto fallback se FluidSynth non funziona. **iOS conserva il fallback per i file MIDI**: l'interfaccia plugin non fornisce ancora MIDI-file playback su iOS.
+- **Spartito completo, interfaccia veloce:** i pentagrammi ora sono virtualizzati a 8 battute per volta, la **barra verde marino** prosegue e scorre lungo i pentagrammi mentre l'audio originale avanza. Frecce per passare manualmente alle battute successive.
+- **Take Five:** riconoscimento **suggerito dal solo nome file** (Take Five / Take 5) come **5/4**, modificabile manualmente in **Opzioni → Tempo in chiave** (3/4, 4/4, 5/4, 6/4). Non è ancora vera inferenza automatica della metrica. MIDI, pentagramma e MusicXML rispettano la metrica selezionata.
+- **Confronto serio:** pulsante **Confronta online** per cercare volontariamente in **IMSLP, MuseScore, 8notes, Flat, ScoreExchange, OpenScore**, aprendo siti esterni (nessuno scraping o download occulto). **Confronta MusicXML** permette importare uno spartito .xml/.musicxml acquisito legalmente dall'utente e calcolare un **F1 reale pitch/onset** (match temporale ±1/16). Questo valore misura solo le note/attacchi corrispondenti con la trascrizione di riferimento, NON la qualità percettiva del brano né il riconoscimento strumenti.
 
-## Aggiornamenti Android: firma stabile indispensabile
+## Limiti e sicurezza
 
-Il file debug generato da GitHub Actions è destinato ai test, **non è un canale di aggiornamento in-place sicuro**: una chiave di debug generata su runner differente può rendere incompatibile l'upgrade sopra l'app installata.
+- L'analisi automatica usa un algoritmo DSP sperimentale: jazz con contrabbasso, pianoforte e sax sovrapposti contiene armoniche che creano **note errate**, anche se il GM suona più realistico. Una ricostruzione *veramente accurata* richiede separation e polyphonic pitch transcription **on-device**, ancora da integrare e testare.
+- Non esegue download automatici dei contenuti degli spartiti o di musica protetta da copyright. L'eventuale ricerca online è volontaria; altre funzioni (analisi, GM, esportazione, NoteLab) sono offline.
+- Lo SoundFont, una volta incorporato nell'APK, funziona senza rete. **Solo la pipeline CI** scarica il SoundFont originale dall'autore con commit Git pinned durante la build.
+- Gli import sono limitati a **512 MB file originale / 1 GB PCM** per motivi di archiviazione; il numero di note e la durata non sono troncati a 40 secondi. File molto lunghi possono richiedere tempo e spazio su disco; la percentuale indica avanzamento reale dell'analisi.
+- La riproduzione GM con player MIDI Android sincronizzato con audio originale da player multipli non è sample-accurate; test con cuffie Bluetooth possono mostrare offset.
+- Il **MIDI esportato contiene gli eventi riconosciuti, non l'audio originale**. Non applica automagicamente mastering o strumenti perfettamente riconosciuti.
 
-La workflow `.github/workflows/android-signed-release.yml` produce una release Android **firmata sempre con la stessa chiave** quando viene inviato un tag `v0.6.0` o successivo, **soltanto dopo** aver configurato in GitHub Settings → Secrets and variables → Actions quattro secret:
-- `AMPY_RELEASE_KEYSTORE_BASE64`: contenuto base64 del file .jks, senza il percorso.
-- `AMPY_RELEASE_STORE_PASSWORD`
-- `AMPY_RELEASE_KEY_ALIAS`
-- `AMPY_RELEASE_KEY_PASSWORD`
-
-Conserva il keystore originale al sicuro e **non** inserire password, token o chiavi nel repository o nella chat. Prima di pubblicare, verificare che la firma resti la stessa in ogni release, così Android potrà installare le versioni successive senza perdere i dati. La workflow esegue test e pubblica un APK su una release GitHub con lo stesso tag; su iOS la distribuzione richiede firma e provisioning Apple separati.
-
-## Importazione
-
-Brani MP3, M4A, AAC, WAV, FLAC, OGG e altri codec compatibili con il dispositivo vengono convertiti offline in PCM per analisi, avviata automaticamente dopo la selezione. Fino a **40 secondi** analizzati per brano, formato di importazione massimo 96 MB e decoder dipendente dal dispositivo. Per la trascrizione accurata polifonica e la separazione effettiva degli strumenti servono modelli IA locali addestrati (non ancora presenti).
-
-## Build sviluppatori
+## Build
 
 ```bash
 flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
 python3 tool/configure_platforms.py
+python3 tool/fetch_soundfont.py
 flutter pub get
 flutter analyze --no-fatal-infos
 flutter test
 flutter build apk --debug
 ```
 
-Per iOS usare macOS + Xcode e provisioning appropriato. La build Android di debug è prodotta da `.github/workflows/android-apk.yml`. Le funzioni di analisi locale restano offline; online solo le funzioni **richieste esplicitamente** (OpenAI API per note testuali, ricerca metadata, controllo update). La disponibilità di una release su GitHub non rende l'installazione automatica.
+La build `android-apk.yml` esegue tutti i passaggi e pubblica l'APK. Per installare aggiornamenti su un APK esistente è necessaria la **stessa firma stabile**; i debug APK delle Actions possono richiedere una installazione separata con backup dei dati.
 
-### Documentazione tecnica consultata
+Licenze componenti: `flutter_midi_pro` MIT (inclusi i termini di librerie native FluidSynth/LGPL), `GeneralUser GS` [licenza specifica 2.0](https://github.com/mrbumpy409/GeneralUser-GS/blob/main/documentation/LICENSE.txt), riportata nel bundle come `assets/soundfonts/GeneralUser-GS-LICENSE.txt`. Per pubblicazione definitiva verificare obblighi di notice LGPL delle librerie native distribuite.
 
-- GitHub REST latest release: https://docs.github.com/en/rest/releases/releases
-- MusicXML 4.0 ties: https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/tied/
-- MusicXML 4.0 beams: https://www.w3.org/2021/06/musicxml40/musicxml-reference/elements/beam/
-- Flutter url_launcher: https://pub.dev/packages/url_launcher
+Riferimenti:
+- GeneralUser GM soundbank: https://github.com/mrbumpy409/GeneralUser-GS
+- flutter_midi_pro: https://pub.dev/packages/flutter_midi_pro
+- MusicXML: https://www.w3.org/2021/06/musicxml40/
+- IMSLP: https://imslp.org/
+- OpenScore: https://openscore.cc/
+- 8notes: https://www.8notes.com/
+- MuseScore: https://musescore.com/
+- Flat: https://flat.io/
+- ScoreExchange: https://www.scoreexchange.com/

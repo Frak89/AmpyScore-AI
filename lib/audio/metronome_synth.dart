@@ -7,6 +7,7 @@ class MetronomeSettings {
     required this.subdivisions,
     required this.durationSeconds,
     this.beatsPerBar = 4,
+    this.startSeconds = 0,
   });
 
   final int bpm;
@@ -14,6 +15,7 @@ class MetronomeSettings {
   final int subdivisions;
   final double durationSeconds;
   final int beatsPerBar;
+  final double startSeconds;
 }
 
 /// Generate a full WAV click track and play from the same seek position as
@@ -23,13 +25,13 @@ class MetronomeSynth {
     const sampleRate = 16000;
     final bpm = settings.bpm.clamp(40, 240);
     final divisions = settings.subdivisions.clamp(1, 8);
-    final duration = settings.durationSeconds.clamp(0.6, 45.0);
+    final duration = settings.durationSeconds.clamp(0.01, 30.0);
     final count = (duration * sampleRate).ceil();
     final pcm = Float32List(count);
     final interval = 60.0 / (bpm * divisions);
-    var click = 0;
+    var click = (settings.startSeconds / interval).ceil();
     while (true) {
-      final begin = ((click * interval) * sampleRate).round();
+      final begin = ((click * interval - settings.startSeconds) * sampleRate).round();
       if (begin >= count) break;
       final accent = (click % (settings.beatsPerBar * divisions)) == 0;
       final beat = click % divisions == 0;

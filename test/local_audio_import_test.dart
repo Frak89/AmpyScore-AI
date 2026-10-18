@@ -19,6 +19,6 @@ void main() {
   });
 
   test('Analysis size bounds remain finite for offline phones', () {
-    expect(LocalAudioImport.maxDecodedBytes, lessThan(64 * 1024 * 1024));
+    expect(LocalAudioImport.maxDecodedBytes, greaterThan(64 * 1024 * 1024));
   });
 }

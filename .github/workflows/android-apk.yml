@@ -22,8 +22,12 @@ jobs:
         run: flutter create --platforms=android,ios --project-name=ampy_score_ai --org=dev.ampyscore .
       - name: Add platform microphone permissions
         run: python3 tool/configure_platforms.py
+      - name: Bundle offline GeneralUser GS SoundFont
+        run: python3 tool/fetch_soundfont.py
       - name: Fetch dependencies
         run: flutter pub get
+      - name: Apply upstream Gradle plugin compatibility
+        run: python3 tool/patch_midi_gradle.py
       - name: Flutter static analysis
         run: flutter analyze --no-fatal-infos
       - name: Test WAV demo/transcription

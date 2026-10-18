@@ -14,7 +14,7 @@ class MultiTrackMidi {
   static const int ticksPerQuarter = 480;
 
   /// Type-1 SMF with tempo track and one actual MIDI track per family.
-  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120}) {
+  static Uint8List export(List<InstrumentPart> parts, {int bpm = 120, int beatsPerBar = 4, Map<InstrumentFamily, double>? gains}) {
     final output = BytesBuilder(copy: false);
     final checkedBpm = bpm.clamp(40, 240);
     final ticksPerSecond = ticksPerQuarter * checkedBpm / 60.0;
@@ -26,8 +26,8 @@ class MultiTrackMidi {
     final meta = <int>[
       0, 0xFF, 0x51, 3,
       (tempo >> 16) & 255, (tempo >> 8) & 255, tempo & 255,
-      // Meter is unknown, 4/4 is an export convention, not analysis.
-      0, 0xFF, 0x58, 4, 4, 2, 24, 8,
+      // Time signature is selectable; default is 4/4 until established.
+      0, 0xFF, 0x58, 4, beatsPerBar.clamp(2, 12), 2, 24, 8,
       0, 0xFF, 0x2F, 0,
     ];
     output.add(_track(meta));
@@ -39,12 +39,15 @@ class MultiTrackMidi {
         if (!part.percussion)
           _Event(0, -2, [0xC0 | channel, part.midiProgram]),
       ];
-      for (final note in part.notes.take(200)) {
+      for (final note in part.notes) {
+        final velocity = (100 * (gains?[part.family] ?? 1.0))
+            .round().clamp(0, 127);
+        if (velocity == 0) continue;
         final first = (note.startSeconds * ticksPerSecond).round().clamp(0, 40000 * 960);
         final last = math.max(first + 1,
             (note.endSeconds * ticksPerSecond).round().clamp(0, 40000 * 960));
         final pitch = note.midi.clamp(0, 127);
-        messages.add(_Event(first, 1, [0x90 | channel, pitch, 100]));
+        messages.add(_Event(first, 1, [0x90 | channel, pitch, velocity]));
         messages.add(_Event(last, 0, [0x80 | channel, pitch, 0]));
       }
       messages.sort((a, b) {
@@ -74,12 +77,12 @@ class MultiTrackMidi {
         duration = math.max(duration, note.endSeconds + 0.1);
       }
     }
-    final length = (duration.clamp(0.4, 40.5) * sampleRate).ceil();
+    final length = (duration.clamp(0.4, 30.0) * sampleRate).ceil();
     final samples = Float32List(length);
     for (final part in request.parts) {
       final gain = (request.gains[part.family] ?? 1.0).clamp(0.0, 1.0);
       if (gain <= 0) continue;
-      for (final note in part.notes.take(200)) {
+      for (final note in part.notes) {
         final from = (math.max(0, note.startSeconds) * sampleRate).round();
         final end = math.min(length, (note.endSeconds * sampleRate).round());
         if (from >= end) continue;
