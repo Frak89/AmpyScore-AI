@@ -14,6 +14,7 @@ dependencies:
   file_picker: ^13.1.0
   audio_decoder: ^0.8.1
   flutter_midi_pro: ^4.0.4
+  xml: ^7.0.1
   url_launcher: ^6.3.3
   package_info_plus: ^10.2.2
   path_provider: ^2.1.6
