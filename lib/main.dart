@@ -20,6 +20,7 @@ import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
+import 'services/local_audio_import.dart';
 
 void main() => runApp(const AmpyScoreApp());
 
@@ -91,8 +92,10 @@ class _StudioPageState extends State<StudioPage> {
     for (final family in InstrumentFamily.values) family: 0.90,
   };
   String? _trackPath;
+  String? _analysisPath;
+  int _pageIndex = 0;
   String _trackName = 'Nessuna traccia';
-  String _status = 'Pronto per una registrazione o un file WAV.';
+  String _status = 'Importa una canzone o registra una melodia.';
   String? _assistantAnswer;
   bool _recording = false;
   bool _busy = false;
@@ -146,7 +149,7 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
-  Future<void> _load(String path, String name) async {
+  Future<void> _load(String path, String name, {String? analysisPath}) async {
     await _pauseTransport();
     await _player.stop();
     await _midiPlayer.stop();
@@ -156,6 +159,7 @@ class _StudioPageState extends State<StudioPage> {
     if (!mounted) return;
     setState(() {
       _trackPath = path;
+      _analysisPath = analysisPath ?? path;
       _trackName = name;
       _notes = const [];
       _parts = const [];
@@ -170,7 +174,7 @@ class _StudioPageState extends State<StudioPage> {
       _cursor = Duration.zero;
       _activeIndex = -1;
       _midiReady = false;
-      _status = 'WAV caricato. Premi Analizza WAV per riconoscere le note.';
+      _status = 'Brano pronto.';
     });
   }
 
@@ -179,37 +183,31 @@ class _StudioPageState extends State<StudioPage> {
         final file = File('${dir.path}/ampyscore_demo.wav');
         await file.writeAsBytes(DemoWav.create(), flush: true);
         await _load(file.path, 'Demo: Do Re Mi Sol');
+        await _analyseInternal();
+        _buildScoreAfterAnalysis();
       });
 
   Future<void> _multiDemo() => _execute(() async {
         final dir = await getApplicationDocumentsDirectory();
         final file = File('${dir.path}/ampyscore_multitrack_demo.wav');
         await file.writeAsBytes(MultiInstrumentDemo.create(), flush: true);
-        await _load(file.path, 'Demo multistrumento: basso, armonia, melodia, beat');
-        if (mounted) {
-          setState(() {
-            _multitrackMode = true;
-            _status = 'Demo multistrumento caricata. Premi Analizza WAV.';
-          });
-        }
+        _multitrackMode = true;
+        await _load(file.path, 'Demo multistrumento');
+        await _analyseInternal();
+        _buildScoreAfterAnalysis();
       });
 
   Future<void> _import() => _execute(() async {
-        final selected = await FilePicker.pickFile(
-          type: FileType.custom,
-          allowedExtensions: ['wav'],
-        );
-        if (selected == null) return;
-        final fileBytes = await selected.readAsBytes();
-        if (fileBytes.length > 32 * 1024 * 1024) {
-          throw const FormatException('WAV troppo grande (limite 32 MB).');
-        }
-        final dir = await getApplicationDocumentsDirectory();
-        final destination = File(
-            '${dir.path}/import_${DateTime.now().millisecondsSinceEpoch}.wav');
-        await destination.writeAsBytes(fileBytes, flush: true);
-        await _load(destination.path, selected.name);
-      });
+    final converted = await LocalAudioImport.pickAndConvert();
+    if (converted == null) return;
+    await _load(
+      converted.playbackPath,
+      converted.displayName,
+      analysisPath: converted.analysisWavPath,
+    );
+    await _analyseInternal();
+    _buildScoreAfterAnalysis();
+  });
 
   Future<void> _toggleRecording() => _execute(() async {
         if (_recording) {
@@ -253,13 +251,13 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _analyseInternal() async {
     await _pauseTransport();
-    final path = _trackPath;
+    final path = _analysisPath;
     if (path == null) {
-      throw StateError('Seleziona una traccia WAV o la demo.');
+      throw StateError('Seleziona un brano o la demo.');
     }
     final bytes = await File(path).readAsBytes();
-    if (bytes.length > 32 * 1024 * 1024) {
-      throw const FormatException('WAV troppo grande (limite 32 MB).');
+    if (bytes.length > LocalAudioImport.maxDecodedBytes) {
+      throw const FormatException('Audio oltre il limite di analisi.');
     }
     if (mounted) setState(() => _status = 'Trascrizione in corso sul dispositivo...');
     await _midiPlayer.stop();
@@ -427,8 +425,8 @@ class _StudioPageState extends State<StudioPage> {
   });
 
   Future<void> _prepareStem() async {
-    final path = _trackPath;
-    if (path == null) throw StateError('Carica prima un WAV.');
+    final path = _analysisPath;
+    if (path == null) throw StateError('Carica prima un brano.');
     await _stemPlayer.stop();
     final source = await File(path).readAsBytes();
     final bytes = await compute(
