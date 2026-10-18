@@ -34,6 +34,7 @@ import 'audio/rhythm_engine.dart';
 import 'audio/stem_extractor.dart';
 import 'audio/stereo_vocal_reducer.dart';
 import 'audio/band_focus_renderer.dart';
+import 'audio/stem_mix_renderer.dart';
 import 'score/score_engine.dart';
 import 'score/score_pdf.dart';
 import 'score/score_sheet.dart';
@@ -42,6 +43,7 @@ import 'score/reference_score.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 import 'services/local_audio_import.dart';
+import 'services/ai_stem_session.dart';
 import 'services/app_updates.dart';
 import 'services/song_lookup.dart';
 
@@ -118,6 +120,14 @@ class _StudioPageState extends State<StudioPage> {
   List<DetectedNote> _notes = const [];
   bool _multitrackMode = true;
   List<InstrumentPart> _parts = const [];
+  final Map<InstrumentFamily, String> _aiStems = {};
+  final Set<InstrumentFamily> _audioStemSelection = {};
+  final Map<InstrumentFamily, double> _audioStemGain = {};
+  String? _cachedAudioMix;
+  String? _cachedMixKey;
+  String? _aiInstrumental;
+  bool _isAiSession = false;
+  bool _singlePartScore = false;
   InstrumentFamily? _selectedFamily;
   InstrumentFamily? _soloFamily;
   Map<InstrumentFamily, double>? _savedBeforeSolo;
@@ -259,6 +269,14 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _aiStems.clear();
+      _audioStemSelection.clear();
+      _audioStemGain.clear();
+      _cachedAudioMix = null;
+      _cachedMixKey = null;
+      _aiInstrumental = null;
+      _isAiSession = false;
+      _singlePartScore = false;
       _instrumentalPath = null;
       _stereoDecodePath = null;
       _vocalReduced = false;
@@ -306,6 +324,81 @@ class _StudioPageState extends State<StudioPage> {
         await _analyseInternal();
         _buildScoreAfterAnalysis();
       });
+
+  /// Preferred primary workflow: import real separated instrument stems
+  /// with per-stem neural notes. The legacy DSP path remains an explicitly
+  /// experimental fallback for direct phone recordings.
+  Future<void> _importAiSession() => _execute(() async {
+    final selected = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['zip'],
+    );
+    if (selected == null) return;
+    final source = selected.path;
+    if (source == null || source.isEmpty) {
+      throw const FormatException(
+        'Il file ZIP deve essere accessibile come file locale.');
+    }
+    if (mounted) setState(() {
+      _analysisProgress = 0;
+      _status = 'Apertura progetto AI multistrumento…';
+    });
+    final session = await AiStemSession.load(source);
+    final alternative = session.stems[InstrumentFamily.harmony] ??
+        session.stems.values.first;
+    await _load(session.originalPath, session.title,
+        analysisPath: alternative);
+    _tempoOverride = session.bpm;
+    _beatsPerBar = session.beatsPerBar;
+    _analysisDuration = session.durationSeconds;
+    _aiStems.addAll(session.stems);
+    _audioStemSelection.addAll(
+      session.stems.keys.where((f) => f != InstrumentFamily.melody),
+    );
+    for (final f in session.stems.keys) {
+      _audioStemGain[f] = 1.0;
+    }
+    _aiInstrumental = session.instrumentalPath;
+    _isAiSession = true;
+    _multitrackMode = true;
+    _parts = session.parts;
+    _rhythm = RhythmReport(
+      bpm: session.bpm, confidence: 0,
+      values: const <NoteValue>{},
+    );
+    _notes = session.parts
+        .where((p) => p.family == InstrumentFamily.melody)
+        .firstOrNull?.notes ??
+        (session.parts.isEmpty ? const [] : session.parts.first.notes);
+    _selectedFamily = session.parts.any(
+      (p) => p.family == InstrumentFamily.melody)
+        ? InstrumentFamily.melody
+        : session.parts.first.family;
+    _midiReady = session.parts.any((p) => p.notes.isNotEmpty);
+    for (final part in session.parts) {
+      if (part.programOverride != null) {
+        _gmPrograms[part.family] = part.programOverride!;
+      }
+      _partGains[part.family] = .82;
+    }
+    _buildScoreAfterAnalysis();
+    if (_midiReady) {
+      await _loadSoundfontMidi(session.parts, session.bpm);
+      if (_soundfontReady) {
+        await _renderSilentMidiClock(session.durationSeconds);
+      } else {
+        await _renderMultiPreview(
+            session.parts, session.durationSeconds);
+      }
+    }
+    await _player.seek(Duration.zero);
+    if (mounted) setState(() {
+      _analysisProgress = 1;
+      _status = 'Analisi AI caricata: '
+          '${session.parts.length} sorgenti separate · '
+          '${_clock(session.durationSeconds)}';
+    });
+  });
 
   Future<void> _import() => _execute(() async {
     final converted = await LocalAudioImport.pickAndConvert();
@@ -638,6 +731,24 @@ class _StudioPageState extends State<StudioPage> {
     return '${n ~/ 60}:${(n % 60).toString().padLeft(2, "0")}';
   }
 
+  ScoreProject? get _visibleScore {
+    final whole = _score;
+    if (whole == null || !_singlePartScore) return whole;
+    final family = _selectedFamily;
+    if (family == null) return whole;
+    final single = whole.parts.where((p) => p.family == family)
+        .firstOrNull;
+    if (single == null) return whole;
+    return ScoreProject(
+      bpm: whole.bpm,
+      beatsPerBar: whole.beatsPerBar,
+      minimumDurationSeconds: whole.minimumDurationSeconds,
+      polyphonic: whole.polyphonic,
+      parts: [single],
+      notes: whole.forFamily(family),
+    );
+  }
+
   void _buildScoreAfterAnalysis() {
     final parts = _parts.isNotEmpty ? _parts : [
       InstrumentPart(
@@ -649,7 +760,8 @@ class _StudioPageState extends State<StudioPage> {
     final bpm = _tempoOverride ?? _rhythm?.bpm ?? 120;
     final project = ScoreProject.fromTranscription(parts, bpm,
         beatsPerBar: _beatsPerBar,
-        minimumDurationSeconds: _analysisDuration);
+        minimumDurationSeconds: _analysisDuration,
+        polyphonic: _isAiSession);
     _metronomeBpm = project.bpm;
     _metronomeReady = false;
     if (mounted) {
@@ -697,6 +809,7 @@ class _StudioPageState extends State<StudioPage> {
         confidence: p.confidence,
         programOverride: _gmPrograms[p.family] ?? p.programOverride,
         signalLevel: p.signalLevel,
+        sourceName: p.sourceName,
       ),
   ];
 
@@ -710,6 +823,7 @@ class _StudioPageState extends State<StudioPage> {
           confidence: part.confidence,
           programOverride: _gmPrograms[part.family] ?? part.programOverride,
           signalLevel: part.signalLevel,
+          sourceName: part.sourceName,
           notes: [
             for (final item in score.forFamily(part.family))
               if (!item.isRest) DetectedNote(
@@ -748,8 +862,36 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _retranscribeAtBpm() async {
     _tempoOverride = _tempoSlider.round();
-    await _analyse();
+    if (_isAiSession) {
+      _buildScoreAfterAnalysis();
+      if (mounted) setState(() =>
+          _status = 'Partitura AI ricalcolata a $_tempoOverride BPM.');
+    } else {
+      await _analyse();
+    }
   }
+
+  Future<void> _exportPartPdf(InstrumentFamily family) =>
+      _execute(() async {
+    final score = _score;
+    if (score == null) return;
+    final part = score.parts
+        .where((p) => p.family == family).firstOrNull;
+    if (part == null) return;
+    final single = ScoreProject(
+      bpm: score.bpm, beatsPerBar: score.beatsPerBar,
+      minimumDurationSeconds: score.minimumDurationSeconds,
+      polyphonic: score.polyphonic,
+      parts: [part], notes: score.forFamily(family),
+    );
+    final output = await ScorePdf.render(single,
+      title: '$_trackName · ${part.name}',
+      sepia: _paperTone == PaperTone.sepia);
+    await Printing.sharePdf(
+      bytes: output, filename: 'AmpyScore_${family.name}.pdf');
+    if (mounted) setState(() =>
+      _status = 'Spartito singolo PDF: ${part.name}');
+  });
 
   Future<void> _exportPdf() => _execute(() async {
     final score = _score;
@@ -789,8 +931,148 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  String get _audioMixKey {
+    final selected = _audioStemSelection.toList()
+      ..sort((a,b) => a.index.compareTo(b.index));
+    return [
+      for (final family in selected)
+        '${family.name}=${(_audioStemGain[family] ?? 1).toStringAsFixed(3)}',
+    ].join('|');
+  }
+
+  void _toggleAudioSource(InstrumentFamily family, bool active) {
+    if (_busy || !_isAiSession) return;
+    setState(() {
+      if (active) {
+        _audioStemSelection.add(family);
+      } else {
+        _audioStemSelection.remove(family);
+      }
+      _cachedMixKey = null;
+    });
+  }
+
+  void _audioGainChanged(InstrumentFamily family, double gain) {
+    if (!_isAiSession) return;
+    setState(() {
+      _audioStemGain[family] = gain;
+      _cachedMixKey = null;
+    });
+  }
+
+  Future<String> _prepareSelectedStemMix() async {
+    if (!_isAiSession) {
+      throw const FormatException(
+        'Il mix diretto richiede sorgenti realmente separate da AI.');
+    }
+    final families = _audioStemSelection.toList()
+      ..sort((a, b) => a.index.compareTo(b.index));
+    if (families.isEmpty) {
+      throw const FormatException('Seleziona almeno una sorgente audio.');
+    }
+    final key = _audioMixKey;
+    final existing = _cachedAudioMix;
+    if (key == _cachedMixKey && existing != null &&
+        await File(existing).exists()) {
+      return existing;
+    }
+    final all = <StemMixInput>[];
+    for (final family in families) {
+      final path = _aiStems[family];
+      if (path == null) {
+        throw FormatException('Sorgente ${family.name} mancante.');
+      }
+      all.add(StemMixInput(File(path),
+        gain: _audioStemGain[family] ?? 1.0));
+    }
+    // A single untouched stem is exported bit-for-bit: no decoder or MIDI.
+    if (all.length == 1 && all.first.gain == 1.0) {
+      _cachedMixKey = key;
+      _cachedAudioMix = all.first.file.path;
+      return all.first.file.path;
+    }
+    final dir = await getTemporaryDirectory();
+    final target = File('${dir.path}/AmpyScore_mix_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    final render = await compute(_offlineMix, (
+      paths: [for (final input in all) input.file.path],
+      gains: [for (final input in all) input.gain],
+      destination: target.path,
+    ));
+    final previous = _cachedAudioMix;
+    _cachedAudioMix = render;
+    _cachedMixKey = key;
+    // Do not delete actual project stems.
+    if (previous != null && !_aiStems.containsValue(previous) &&
+        previous != render) {
+      try { await File(previous).delete(); } catch (_) {}
+    }
+    return render;
+  }
+
+  static Future<String> _offlineMix(({
+    List<String> paths, List<double> gains, String destination
+  }) input) async {
+    final items = <StemMixInput>[
+      for (var i = 0; i < input.paths.length; i++)
+        StemMixInput(File(input.paths[i]), gain: input.gains[i]),
+    ];
+    final output = await StemMixRenderer.export(
+      selected: items, output: File(input.destination));
+    return output.path;
+  }
+
+  Future<void> _previewSelectedAudio() => _execute(() async {
+    await _pauseTransport();
+    await _stemPlayer.stop();
+    final audio = await _prepareSelectedStemMix();
+    await _stemPlayer.setFilePath(audio);
+    await _stemPlayer.setSpeed(_playbackSpeed);
+    await _stemPlayer.setVolume(_originalVolume);
+    await _stemPlayer.seek(_cursor);
+    unawaited(_stemPlayer.play());
+    if (mounted) setState(() =>
+      _status = 'Ascolto sorgenti audio reali, senza MIDI.');
+  });
+
+  Future<void> _exportSelectedAudio() => _execute(() async {
+    final audio = await _prepareSelectedStemMix();
+    final selectedNames = _audioStemSelection
+        .map((f) => f.name).toList()..sort();
+    final filename = selectedNames.length == 1
+        ? 'AmpyScore_${selectedNames.first}_isolato.wav'
+        : 'AmpyScore_${selectedNames.join('_')}_mix.wav';
+    await SharePlus.instance.share(ShareParams(
+      files: [XFile(audio, mimeType: 'audio/wav')],
+      fileNameOverrides: [filename],
+      title: 'Esporta tracce audio separate (nessun MIDI)',
+    ));
+    if (mounted) setState(() => _status =
+        'Audio sorgente WAV pronto: $filename');
+  });
+
   Future<void> _exportAudio(String choice) => _execute(() async {
     if (_trackPath == null) throw StateError('Importa un brano.');
+    if (_isAiSession) {
+      final key = choice.startsWith('band_') ? choice.substring(5) : '';
+      final family = InstrumentFamily.values
+          .where((f) => f.name == key).firstOrNull;
+      final actual = switch (choice) {
+        'instrumental' => _aiInstrumental,
+        'voice' => _aiStems[InstrumentFamily.melody],
+        _ => family == null ? null : _aiStems[family],
+      };
+      if (actual == null) {
+        throw const FormatException('Sorgente audio AI non presente.');
+      }
+      await SharePlus.instance.share(ShareParams(
+        files: [XFile(actual, mimeType: 'audio/wav')],
+        fileNameOverrides: [
+          'AmpyScore_AI_${choice == 'voice' ? 'vocals' : choice}.wav',
+        ],
+      ));
+      return;
+    }
     final dir = await getTemporaryDirectory();
     final stem = choice.startsWith('band_')
       ? choice.substring(5)
@@ -915,6 +1197,22 @@ class _StudioPageState extends State<StudioPage> {
   /// Reduces stereo center information: no model, not a true vocal stem.
   Future<void> _toggleInstrumental() => _execute(() async {
     if (_trackPath == null) return;
+    if (_isAiSession && _aiInstrumental != null) {
+      final at = _cursor;
+      await _pauseTransport();
+      final next = !_vocalReduced;
+      await _player.setFilePath(next ? _aiInstrumental! : _trackPath!);
+      await _player.setSpeed(_playbackSpeed);
+      await _player.setVolume(_originalVolume);
+      await _player.seek(at);
+      if (mounted) setState(() {
+        _vocalReduced = next;
+        _status = next
+          ? 'Base strumentale AI: voce separata.'
+          : 'Brano originale.';
+      });
+      return;
+    }
     final at = _cursor;
     await _pauseTransport();
     if (!_vocalReduced && _instrumentalPath == null) {
@@ -1004,6 +1302,22 @@ class _StudioPageState extends State<StudioPage> {
 
   void _listenFamilyBand(InstrumentFamily family) {
     if (_busy || _recording) return;
+    final authenticStem = _aiStems[family];
+    if (_isAiSession && authenticStem != null) {
+      unawaited(_execute(() async {
+        await _pauseTransport();
+        await _stemPlayer.stop();
+        await _stemPlayer.setFilePath(authenticStem);
+        await _stemPlayer.setSpeed(_playbackSpeed);
+        await _stemPlayer.seek(_cursor);
+        await _stemPlayer.setVolume(_originalVolume);
+        unawaited(_stemPlayer.play());
+        if (mounted) setState(() =>
+          _status = 'Sorgente AI isolata: '
+              '${_parts.where((p) => p.family == family).first.name}');
+      }));
+      return;
+    }
     setState(() {
       _focusStem = switch (family) {
         InstrumentFamily.bass => FocusStem.bass,
@@ -1543,7 +1857,8 @@ class _StudioPageState extends State<StudioPage> {
         _mode = null;
       });
     }
-    await Future.wait([_player.pause(), _midiPlayer.pause(), _metronomePlayer.pause()]);
+    await Future.wait([_player.pause(), _midiPlayer.pause(),
+      _metronomePlayer.pause(), _stemPlayer.pause()]);
     if (_soundfontReady) await _synth.pauseMidi();
   }
 
@@ -1764,7 +2079,7 @@ class _StudioPageState extends State<StudioPage> {
           child: Stack(children: [
             Positioned.fill(
               child: StudioScore(
-                project: _score!,
+                project: _visibleScore ?? _score!,
                 positionSeconds: _cursor.inMicroseconds / 1000000.0,
                 tone: _paperTone,
                 activeNoteId: _selectedNoteId,
@@ -2016,28 +2331,52 @@ class _StudioPageState extends State<StudioPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Wrap(spacing: 8, runSpacing: 8, children: [
-          FilledButton.icon(
-            onPressed: _busy || _recording ? null : _import,
-            icon: const Icon(Icons.folder_open),
-            label: const Text('Apri brano'),
+        const Text('Dalla canzone allo spartito',
+          style: TextStyle(fontSize: 20,
+              fontWeight: FontWeight.w700)),
+        const SizedBox(height: 6),
+        const Text('Strumenti separati · Note · Partitura completa',
+          style: TextStyle(fontSize: 12, color: Color(0xFF9AB9B3))),
+        const SizedBox(height: 14),
+        SizedBox(
+          width: double.infinity,
+          child: FilledButton.icon(
+            onPressed: _busy || _recording ? null : _importAiSession,
+            icon: const Icon(Icons.auto_awesome),
+            label: const Text('Apri progetto AI multistrumento'),
           ),
-          FilledButton.tonalIcon(
+        ),
+        const SizedBox(height: 7),
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          OutlinedButton.icon(
+            onPressed: _busy || _recording ? null : _import,
+            icon: const Icon(Icons.library_music),
+            label: const Text('Analisi rapida brano'),
+          ),
+          OutlinedButton.icon(
             onPressed: _busy ? null : _toggleRecording,
             icon: Icon(_recording ? Icons.stop_circle : Icons.mic),
-            label: Text(_recording ? 'Stop' : 'Registra'),
+            label: Text(_recording ? 'Termina' : 'Microfono'),
           ),
-
         ]),
         if (_trackPath != null) ...[
-          const SizedBox(height: 9),
-          Text(
-            _trackName,
-            style: const TextStyle(
-                fontSize: 16, fontWeight: FontWeight.w600),
-            maxLines: 1,
-            overflow: TextOverflow.ellipsis,
-          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            Icon(_isAiSession ? Icons.check_circle : Icons.info_outline,
+              size: 18, color: const Color(0xFF62DFC3)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(_trackName,
+                style: const TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600),
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+            ),
+          ]),
+          if (!_isAiSession && _parts.isNotEmpty)
+            const Text('Analisi rapida: registri stimati, '
+              'non singoli strumenti realmente isolati.',
+              style: TextStyle(fontSize: 11,
+                  color: Color(0xFFE6B76A))),
         ],
       ],
     );
@@ -2049,12 +2388,65 @@ class _StudioPageState extends State<StudioPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (_isAiSession && _parts.isNotEmpty) ...[
+          const Text('Sorgenti riconosciute',
+            style: TextStyle(fontSize: 15,
+              fontWeight: FontWeight.w700)),
+          const SizedBox(height: 8),
+          for (final part in _parts)
+            ListTile(
+              dense: true,
+              contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+              leading: Icon(switch (part.family) {
+                InstrumentFamily.melody => Icons.record_voice_over,
+                InstrumentFamily.bass => Icons.speaker,
+                InstrumentFamily.drums => Icons.album,
+                InstrumentFamily.harmony => Icons.piano,
+              }, color: const Color(0xFF62DFC3)),
+              title: Text(part.name,
+                maxLines: 1, overflow: TextOverflow.ellipsis),
+              subtitle: Text('${part.notes.length} note riconosciute'),
+              trailing: Wrap(spacing: 0, children: [
+                IconButton(
+                  tooltip: 'Esporta spartito singolo PDF',
+                  icon: const Icon(Icons.picture_as_pdf_outlined),
+                  onPressed: _busy ? null : () => unawaited(
+                      _exportPartPdf(part.family)),
+                ),
+                IconButton(
+                  tooltip: 'Ascolta sorgente separata',
+                  icon: const Icon(Icons.headphones),
+                  onPressed: _busy ? null :
+                      () => _listenFamilyBand(part.family),
+                ),
+                IconButton(
+                  tooltip: 'Seleziona pentagramma',
+                  icon: const Icon(Icons.notes),
+                  onPressed: _busy ? null : () {
+                    _selectFamily(part.family);
+                    setState(() => _pageIndex = 2);
+                  },
+                ),
+              ]),
+            ),
+          const SizedBox(height: 6),
+        ],
         Row(children: [
           const Expanded(
             child: Text('Partitura',
                 style: TextStyle(fontSize: 20,
                     fontWeight: FontWeight.w700)),
           ),
+          if (_score != null)
+            IconButton(
+              tooltip: _singlePartScore
+                ? 'Mostra partitura completa'
+                : 'Mostra solo lo strumento selezionato',
+              icon: Icon(_singlePartScore ? Icons.view_module :
+                Icons.view_agenda_outlined),
+              onPressed: () =>
+                setState(() => _singlePartScore = !_singlePartScore),
+            ),
           if (_rhythm != null)
             Text('≈ ${_rhythm!.bpm} BPM',
                 style: const TextStyle(color: Color(0xFF62DFC3))),
@@ -2085,7 +2477,7 @@ class _StudioPageState extends State<StudioPage> {
           )
         else ...[
           StudioScore(
-            project: score,
+            project: _visibleScore ?? score,
             positionSeconds: _cursor.inMicroseconds / 1000000.0,
             tone: _paperTone,
             activeNoteId: _selectedNoteId,
@@ -2224,8 +2616,11 @@ class _StudioPageState extends State<StudioPage> {
           ),
           if (ready)
             TextButton(
-              onPressed: _analyse,
-              child: const Text('Rianalizza'),
+              onPressed: _isAiSession ? () {
+                _buildScoreAfterAnalysis();
+              } : _analyse,
+              child: Text(_isAiSession
+                ? 'Ricalcola partitura' : 'Rianalizza'),
             ),
           if (score != null)
             OutlinedButton.icon(
@@ -2291,7 +2686,7 @@ class _StudioPageState extends State<StudioPage> {
           ),
         ]),
         StudioScore(
-          project: score,
+          project: _visibleScore ?? score,
           positionSeconds: _cursor.inMicroseconds / 1000000,
           tone: _paperTone,
           activeNoteId: _selectedNoteId,
@@ -2344,14 +2739,117 @@ class _StudioPageState extends State<StudioPage> {
     );
   }
 
+  Widget _realAudioStemMixer() {
+    return _section(
+      icon: Icons.multitrack_audio,
+      title: 'Mixer audio originale · senza MIDI',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final part in _parts)
+            if (_aiStems.containsKey(part.family)) ...[
+              CheckboxListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                value: _audioStemSelection.contains(part.family),
+                title: Text(part.name,
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                secondary: Icon(switch (part.family) {
+                  InstrumentFamily.bass => Icons.speaker,
+                  InstrumentFamily.harmony => Icons.piano,
+                  InstrumentFamily.melody => Icons.mic,
+                  InstrumentFamily.drums => Icons.album,
+                }),
+                onChanged: _busy ? null : (enabled) =>
+                  _toggleAudioSource(part.family, enabled ?? false),
+              ),
+              if (_audioStemSelection.contains(part.family))
+                Row(children: [
+                  const Text('Volume',style:TextStyle(fontSize:12)),
+                  Expanded(
+                    child: Slider(
+                      min: 0, max: 1.5,
+                      divisions: 30,
+                      value: _audioStemGain[part.family] ?? 1,
+                      onChanged: _busy ? null : (value) =>
+                        _audioGainChanged(part.family, value),
+                    ),
+                  ),
+                  SizedBox(width: 45, child: Text(
+                    '${((_audioStemGain[part.family] ?? 1)*100).round()}%',
+                    style: const TextStyle(fontSize: 12))),
+                ]),
+            ],
+          const SizedBox(height: 7),
+          Wrap(spacing: 7, runSpacing: 7, children: [
+            OutlinedButton(
+              onPressed: _busy ? null : () => setState(() {
+                _audioStemSelection
+                  ..clear()
+                  ..addAll(_aiStems.keys);
+                _cachedMixKey = null;
+              }),
+              child: const Text('Tutti'),
+            ),
+            OutlinedButton(
+              onPressed: _busy ? null : () => setState(() {
+                _audioStemSelection
+                  ..clear()
+                  ..addAll(_aiStems.keys.where(
+                    (f) => f != InstrumentFamily.melody));
+                _cachedMixKey = null;
+              }),
+              child: const Text('Senza voce'),
+            ),
+            OutlinedButton(
+              onPressed: _busy ? null : () => setState(() {
+                _audioStemSelection.clear();
+                _cachedMixKey = null;
+              }),
+              child: const Text('Nessuno'),
+            ),
+          ]),
+          const SizedBox(height: 11),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            FilledButton.icon(
+              onPressed: _busy || _audioStemSelection.isEmpty
+                  ? null : _previewSelectedAudio,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Ascolta selezione'),
+            ),
+            OutlinedButton.icon(
+              onPressed: _busy || _audioStemSelection.isEmpty
+                  ? null : _exportSelectedAudio,
+              icon: const Icon(Icons.file_download_outlined),
+              label: const Text('Esporta WAV'),
+            ),
+          ]),
+          const SizedBox(height: 7),
+          const Text(
+            'WAV stereo senza compressione aggiuntiva, 24 bit '
+            'nei mix; una singola sorgente è copiata invariata.',
+            style: TextStyle(fontSize: 11,
+                color: Color(0xFFAFBEC9)),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _tracksView() {
     return Column(
       children: [
+        if (_isAiSession && _aiStems.isNotEmpty) ...[
+          _realAudioStemMixer(),
+          const SizedBox(height: 12),
+        ],
         _section(
           icon: Icons.graphic_eq,
-          title: 'Tracce MIDI',
+          title: _isAiSession
+              ? 'Strumenti realmente separati' : 'Registri MIDI stimati',
           child: MultiTrackPanel(
             parts: _parts,
+            separatedAudio: _isAiSession,
             rhythm: _rhythm,
             selected: _selectedFamily,
             gains: _partGains,
@@ -2370,7 +2868,7 @@ class _StudioPageState extends State<StudioPage> {
             onGainDone: () => unawaited(_remix()),
           ),
         ),
-        if (_instrumentGuesses.isNotEmpty) ...[
+        if (!_isAiSession && _instrumentGuesses.isNotEmpty) ...[
           const SizedBox(height: 8),
           for (final part in _parts)
             if (_instrumentGuesses[part.family] != null)
@@ -2441,13 +2939,24 @@ class _StudioPageState extends State<StudioPage> {
                             unawaited(_remix());
                           },
                         ),
-                      Align(alignment:Alignment.centerRight,
-                        child:TextButton.icon(
-                          onPressed:_busy?null:()=>unawaited(
-                            _exportSoloMidi(part.family)),
-                          icon:const Icon(Icons.save_alt),
-                          label:const Text('Esporta MIDI traccia'),
-                        )),
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: Wrap(spacing: 8, children: [
+                          OutlinedButton.icon(
+                            onPressed: _busy || _score == null ? null :
+                                () => unawaited(_exportPartPdf(part.family)),
+                            icon: const Icon(Icons.picture_as_pdf_outlined,
+                              size: 17),
+                            label: const Text('PDF'),
+                          ),
+                          OutlinedButton.icon(
+                            onPressed: _busy ? null : () =>
+                                unawaited(_exportSoloMidi(part.family)),
+                            icon: const Icon(Icons.piano, size: 17),
+                            label: const Text('MIDI'),
+                          ),
+                        ]),
+                      ),
                     ],
                   ),
                 ),
@@ -2466,10 +2975,20 @@ class _StudioPageState extends State<StudioPage> {
             ]),
           ),
         ],
-        if (_trackPath != null)
+        if (_isAiSession)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 12),
+            child: Text('Sorgenti da Demucs, note da Basic Pitch. '
+                'Il programma degli strumenti è modificabile: '
+                'separare una sorgente non garantisce riconoscere '
+                'ogni strumento dentro “Altri”.',
+              style: const TextStyle(fontSize: 11,
+                  color: Color(0xFFBACAC5))),
+          ),
+        if (_trackPath != null && !_isAiSession)
           _section(
             icon: Icons.file_download_outlined,
-            title: 'Esporta audio (WAV)',
+            title: 'Esporta filtri audio (WAV)',
             child: Column(
               crossAxisAlignment:CrossAxisAlignment.stretch,
               children:[
@@ -2503,7 +3022,7 @@ class _StudioPageState extends State<StudioPage> {
             ),
           ),
         const SizedBox(height: 10),
-        if (_trackPath != null) ...[
+        if (_trackPath != null && !_isAiSession) ...[
           const SizedBox(height: 12),
           _section(
             icon: Icons.record_voice_over_outlined,
