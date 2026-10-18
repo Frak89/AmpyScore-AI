@@ -25,6 +25,7 @@ import 'audio/stem_extractor.dart';
 import 'score/score_engine.dart';
 import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
+import 'score/reference_score.dart';
 import 'ui/multitrack_panel.dart';
 import 'services/chatgpt_service.dart';
 import 'services/local_audio_import.dart';
@@ -1384,6 +1385,12 @@ class _StudioPageState extends State<StudioPage> {
               onPressed: _searching ? null : _openSongSearch,
               label: const Text('Confronta online'),
             ),
+          if (score != null)
+            OutlinedButton.icon(
+              icon: const Icon(Icons.compare_arrows),
+              onPressed: _busy ? null : _compareReference,
+              label: const Text('Confronta MusicXML'),
+            ),
         ]),
 
       ],
@@ -1562,6 +1569,52 @@ class _StudioPageState extends State<StudioPage> {
       ],
     );
   }
+
+  Future<void> _compareReference() => _execute(() async {
+    final project = _score;
+    if (project == null) return;
+    final file = await FilePicker.pickFile(
+      type: FileType.custom,
+      allowedExtensions: ['musicxml', 'xml'],
+    );
+    if (file == null) return;
+    if (await file.length() > 12 * 1024 * 1024) {
+      throw const FormatException('MusicXML troppo grande.');
+    }
+    final xml = utf8.decode(await file.readAsBytes(), allowMalformed: false);
+    final comparison = ReferenceScore.compare(project, xml);
+    if (!mounted) return;
+    final action = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Confronto MusicXML'),
+        content: Text('Coincidenze intonazione/attacco: '
+          '${(100 * comparison.f1).toStringAsFixed(1)}% F1.\n'
+          '${comparison.matched} note abbinate su '
+          '${comparison.transcribed} rilevate e '
+          '${comparison.reference} di riferimento.\n'
+          'Tolleranza: 1/16 (2 scatti di 1/32).'
+          '${comparison.meter == null ? "" : "\\nMetrica riferimento: ${comparison.meter}/4"}'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Chiudi')),
+          if (comparison.meter != null && comparison.meter != _beatsPerBar &&
+              comparison.meter! >= 2 && comparison.meter! <= 12)
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text('Usa ${comparison.meter}/4')),
+        ],
+      ),
+    );
+    if (action == true) {
+      setState(() {
+        _beatsPerBar = comparison.meter!;
+        _score!.beatsPerBar = comparison.meter!;
+        _metronomeReady = false;
+      });
+    }
+  });
 
   Future<void> _openSongSearch() async {
     final input = await showDialog<String>(
