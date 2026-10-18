@@ -40,11 +40,10 @@ jobs:
           echo "AMPY_KEYSTORE_PATH=ampyscore-release.jks" >> "$GITHUB_ENV"
           python3 tool/configure_release_signing.py
           # The keystore belongs to android/app/ and is never committed.
-      - name: Apply upstream Gradle plugin compatibility
-        run: python3 tool/patch_midi_gradle.py
       - name: Analyze and test
         run: |
           flutter pub get
+          python3 tool/patch_midi_gradle.py
           flutter analyze --no-fatal-infos
           flutter test
       - name: Signed release APK
