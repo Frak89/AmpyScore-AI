@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -18,6 +19,8 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
+import 'audio/live_capture_store.dart';
+import 'audio/live_transcription.dart';
 import 'audio/wav_window_reader.dart';
 import 'audio/midi_engine.dart';
 import 'audio/playback_tuning.dart';
@@ -101,6 +104,16 @@ class _StudioPageState extends State<StudioPage> {
   final _apiKey = TextEditingController();
   final _songQuery = TextEditingController();
   Timer? _transportTimer;
+  Timer? _liveTimer;
+  StreamSubscription<Uint8List>? _liveSubscription;
+  LiveCaptureStore? _liveCapture;
+  Future<void> _captureWrites = Future<void>.value();
+  final LiveTranscriptionAccumulator _liveAccumulator =
+      LiveTranscriptionAccumulator();
+  bool _liveProcessing = false;
+  String? _liveCaptureError;
+  int _liveBpm = 120;
+  bool _liveTempoLocked = false;
 
   List<DetectedNote> _notes = const [];
   bool _multitrackMode = true;
@@ -183,6 +196,11 @@ class _StudioPageState extends State<StudioPage> {
   @override
   void dispose() {
     _transportTimer?.cancel();
+    _liveTimer?.cancel();
+    unawaited(_liveSubscription?.cancel() ?? Future<void>.value());
+    if (_recording) unawaited(_recorder.stop());
+    if (_liveCapture != null) unawaited(_captureWrites.then((_) =>
+        _liveCapture!.finish()).then((_) {}));
     _speedDebounce?.cancel();
     _apiKey.dispose();
     _songQuery.dispose();
@@ -301,45 +319,166 @@ class _StudioPageState extends State<StudioPage> {
     _buildScoreAfterAnalysis();
   });
 
+  /// The main app workflow: microphone → progressive multistaff →
+  /// completed Studio transcription after stopping. The microphone streams
+  /// PCM16 directly to an on-disk WAV, not a RAM recording buffer.
   Future<void> _toggleRecording() => _execute(() async {
-        if (_recording) {
-          final path = await _recorder.stop();
-          if (mounted) setState(() => _recording = false);
-          if (path == null) {
-            throw StateError('Nessuna registrazione prodotta.');
-          }
-          await _load(path, 'Registrazione microfono');
-          await _analyseInternal();
-          _buildScoreAfterAnalysis();
-          return;
-        }
-        if (!await _recorder.hasPermission()) {
-          throw StateError('Permesso microfono negato.');
-        }
-        await _pauseTransport();
-        await _player.stop();
-        await _midiPlayer.stop();
-        await _notePlayer.stop();
-        await _stemPlayer.stop();
-        final dir = await getApplicationDocumentsDirectory();
-        final path =
-            '${dir.path}/rec_${DateTime.now().millisecondsSinceEpoch}.wav';
-        await _recorder.start(
-          const RecordConfig(
-            encoder: AudioEncoder.wav,
-            sampleRate: 16000,
-            numChannels: 1,
-            autoGain: false,
-          ),
-          path: path,
-        );
-        if (mounted) {
-          setState(() {
-            _recording = true;
-            _status = 'Registrazione in corso. Premi Stop e analizza.';
-          });
-        }
+    if (_recording) {
+      await _stopLiveRecording();
+    } else {
+      await _startLiveRecording();
+    }
+  });
+
+  Future<void> _startLiveRecording() async {
+    if (!await _recorder.hasPermission()) {
+      throw StateError('Consenti l’accesso al microfono per ascoltare.');
+    }
+    await _pauseTransport();
+    await _stemPlayer.stop();
+    await _notePlayer.stop();
+    final folder = await getApplicationDocumentsDirectory();
+    final output = File('${folder.path}/AmpyScore_live_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    final store = await LiveCaptureStore.open(output);
+    try {
+      final stream = await _recorder.startStream(const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+        autoGain: false,
+        echoCancel: false,
+        noiseSuppress: false,
+      ));
+      _liveCapture = store;
+      _liveAccumulator.clear();
+      _liveBpm = 120;
+      _liveTempoLocked = false;
+      _liveCaptureError = null;
+      _captureWrites = Future<void>.value();
+      _liveSubscription = stream.listen((bytes) {
+        // Serializes disk writes regardless of stream burst rate.
+        _captureWrites = _captureWrites.then((_) => store.append(bytes))
+            .catchError((Object error) {
+          _liveCaptureError = error.toString();
+          if (mounted) setState(() =>
+            _status = 'Registrazione: ${_liveCaptureError!}');
+        });
+      }, onError: (Object error) {
+        _liveCaptureError = error.toString();
+        if (mounted) setState(() =>
+          _status = 'Microfono: ${_liveCaptureError!}');
       });
+      if (!mounted) return;
+      setState(() {
+        _recording = true;
+        _multitrackMode = true;
+        _trackName = 'Ascolto dal microfono';
+        _parts = [];
+        _notes = [];
+        _score = null;
+        _rhythm = null;
+        _midiReady = false;
+        _status = 'Ascolto in corso';
+        _analysisDuration = 0;
+        _pageIndex = 0;
+      });
+      _liveTimer?.cancel();
+      _liveTimer = Timer.periodic(
+        const Duration(milliseconds: 2300),
+        (_) => unawaited(_refreshLivePreview()),
+      );
+    } catch (_) {
+      await store.finish();
+      await output.delete();
+      rethrow;
+    }
+  }
+
+  Future<void> _refreshLivePreview() async {
+    final store = _liveCapture;
+    if (!_recording || _liveProcessing || store == null) return;
+    _liveProcessing = true;
+    try {
+      // Serialize header snapshots with incoming PCM writes so the RIFF
+      // header cannot race with a microphone callback's file position.
+      _captureWrites = _captureWrites.then((_) async {
+        await store.snapshot();
+      });
+      await _captureWrites;
+      final total = store.durationSeconds;
+      final processed = _liveAccumulator.processedUntil;
+      if (total - processed < 2.2) return;
+      final beginning = math.max(0.0, processed - .32);
+      final cutoff = math.max(processed, total - .20);
+      final reader = await WavWindowReader.open(store.file);
+      final window = await reader.window(beginning, total - beginning);
+      if (window.isEmpty) return;
+      final result = await compute(MultiTrackAnalyzer.analyze, window);
+      if (!_recording || !mounted) return;
+      _liveAccumulator.add(
+        result, startSeconds: beginning, endSeconds: cutoff);
+      final parts = _liveAccumulator.parts;
+      if (parts.isEmpty) {
+        setState(() => _status = 'Ascolto · ${_clock(total)}');
+        return;
+      }
+      final rhythm = RhythmAnalyzer.estimate(parts);
+      if (!_liveTempoLocked && total >= 8 &&
+          _liveAccumulator.noteCount >= 7) {
+        _liveBpm = rhythm.bpm;
+        _liveTempoLocked = true;
+      }
+      final bpm = _tempoOverride ?? _liveBpm;
+      final primary = parts.where((p) =>
+          p.family == InstrumentFamily.melody);
+      final chosen = primary.isNotEmpty ? primary.first : parts.first;
+      final project = ScoreProject.fromTranscription(parts, bpm,
+        beatsPerBar: _beatsPerBar,
+        minimumDurationSeconds: total,
+      );
+      setState(() {
+        _parts = parts;
+        _notes = chosen.notes;
+        _selectedFamily = chosen.family;
+        _rhythm = rhythm;
+        _score = project;
+        _analysisDuration = total;
+        _cursor = Duration(milliseconds: (total * 1000).round());
+        _status = 'Ascolto · ${_clock(total)} · '
+            '${_liveAccumulator.noteCount} note provvisorie';
+      });
+    } catch (error) {
+      if (mounted) setState(() =>
+        _status = 'Analisi Live: $error');
+    } finally {
+      _liveProcessing = false;
+    }
+  }
+
+  Future<void> _stopLiveRecording() async {
+    _liveTimer?.cancel();
+    _liveTimer = null;
+    if (mounted) setState(() => _recording = false);
+    await _recorder.stop();
+    await _liveSubscription?.cancel();
+    _liveSubscription = null;
+    await _captureWrites;
+    final store = _liveCapture;
+    _liveCapture = null;
+    if (store == null) throw StateError('Nessun audio registrato.');
+    final path = await store.finish();
+    if (store.frames < 16000) {
+      throw StateError('Registra almeno un secondo di musica.');
+    }
+    if (_liveCaptureError != null) {
+      throw StateError('Errore durante la cattura: $_liveCaptureError');
+    }
+    await _load(path.path, 'Registrazione dal microfono');
+    await _analyseInternal();
+    _buildScoreAfterAnalysis();
+    if (mounted) setState(() => _pageIndex = 1);
+  }
 
   /// Complete song analysis, bounded 16-second PCM chunks in worker isolates.
   Future<void> _analyseInternal() async {
@@ -1674,7 +1813,7 @@ class _StudioPageState extends State<StudioPage> {
         title: const Row(children: [
           Icon(Icons.graphic_eq_rounded, color: Color(0xFF62DFC3)),
           SizedBox(width: 10),
-          Text('AmpyScore Studio',
+          Text('AmpyScore AI',
               style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20)),
         ]),
         actions: [
@@ -1689,8 +1828,10 @@ class _StudioPageState extends State<StudioPage> {
         selectedIndex: _pageIndex,
         onDestinationSelected: (value) => setState(() => _pageIndex = value),
         destinations: const [
+          NavigationDestination(icon: Icon(Icons.mic_none),
+              selectedIcon: Icon(Icons.mic), label: 'Ascolta'),
           NavigationDestination(icon: Icon(Icons.library_music_outlined),
-              selectedIcon: Icon(Icons.library_music), label: 'Studio'),
+              selectedIcon: Icon(Icons.library_music), label: 'Spartito'),
           NavigationDestination(icon: Icon(Icons.edit_note_outlined),
               selectedIcon: Icon(Icons.edit_note), label: 'NoteLab'),
           NavigationDestination(icon: Icon(Icons.tune_outlined),
@@ -1703,26 +1844,171 @@ class _StudioPageState extends State<StudioPage> {
         child: ListView(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
           children: [
-            if (_pageIndex == 0) _importToolbar(),
+            if (_pageIndex == 1) _importToolbar(),
             if (_busy) ...[
               const SizedBox(height: 10),
               LinearProgressIndicator(minHeight: 3,
                 value: _analysisProgress > 0 ? _analysisProgress : null),
             ],
-            if (!_busy && _trackPath != null && _pageIndex == 0) ...[
+            if (!_busy && _trackPath != null && _pageIndex == 1) ...[
               const SizedBox(height: 8),
               Text(_status,
                 style: const TextStyle(fontSize: 12, color: Color(0xFFA2B6C1)),
                 maxLines: 1, overflow: TextOverflow.ellipsis),
             ],
             const SizedBox(height: 12),
-            if (_pageIndex == 0) _studioView(ready),
-            if (_pageIndex == 1) _noteLabView(),
-            if (_pageIndex == 2) _tracksView(),
-            if (_pageIndex == 3) _settingsView(),
+            if (_pageIndex == 0) _listenHome(),
+            if (_pageIndex == 1) _studioView(ready),
+            if (_pageIndex == 2) _noteLabView(),
+            if (_pageIndex == 3) _tracksView(),
+            if (_pageIndex == 4) _settingsView(),
           ],
         ),
       ),
+    );
+  }
+
+  /// The original product vision is the home screen rather than an
+  /// advanced tab: listen to music and turn it into an instrument score.
+  Widget _listenHome() {
+    final score = _score;
+    final live = _recording;
+    final duration = _liveCapture?.durationSeconds ??
+        _analysisDuration;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('Ascolta e trascrivi',
+          style: TextStyle(fontSize: 25,
+              fontWeight: FontWeight.w700)),
+        const SizedBox(height: 6),
+        Text(
+          live ? 'Trascrizione progressiva dal microfono'
+               : 'Dalla musica a uno spartito per ogni parte',
+          style: const TextStyle(
+            color: Color(0xFFABBBC6), fontSize: 13),
+        ),
+        const SizedBox(height: 20),
+        Card(
+          color: const Color(0xFF172832),
+          child: Padding(
+            padding: const EdgeInsets.all(18),
+            child: Column(children: [
+              Icon(live ? Icons.graphic_eq_rounded : Icons.mic_rounded,
+                color: live
+                    ? const Color(0xFF62DFC3)
+                    : const Color(0xFFB4EBD9),
+                size: 54),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _toggleRecording,
+                  icon: Icon(live ? Icons.stop_circle : Icons.mic),
+                  label: Text(live
+                    ? 'Termina e completa lo spartito'
+                    : 'Ascolta dal microfono'),
+                ),
+              ),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: live || _busy ? null : _import,
+                  icon: const Icon(Icons.audio_file_outlined),
+                  label: const Text('Apri una canzone'),
+                ),
+              ),
+              if (live) ...[
+                const SizedBox(height: 14),
+                Text(_clock(duration), style:
+                  const TextStyle(fontSize: 26,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 0.4)),
+                const SizedBox(height: 5),
+                Text('Note rilevate: ${_liveAccumulator.noteCount}',
+                  style: const TextStyle(color: Color(0xFF94D9C4))),
+              ],
+            ]),
+          ),
+        ),
+        const SizedBox(height: 12),
+        if (_busy)
+          const LinearProgressIndicator(minHeight: 3),
+        if (live || score != null) ...[
+          const SizedBox(height: 14),
+          Row(children: [
+            const Expanded(child: Text('Partitura multitraccia',
+              style: TextStyle(fontSize: 18,
+                fontWeight: FontWeight.w700))),
+            if (_rhythm != null)
+              Text('≈ ${_rhythm!.bpm} BPM',
+                style: const TextStyle(color: Color(0xFF62DFC3))),
+          ]),
+          const SizedBox(height: 8),
+          if (score != null && score.parts.isNotEmpty)
+            StudioScore(
+              project: score,
+              positionSeconds: live ? duration :
+                  _cursor.inMicroseconds / 1000000.0,
+              tone: _paperTone,
+              activeNoteId: null,
+              onFullScreen: live ? null :
+                  () => setState(() => _forceScoreFullScreen = true),
+              onTapNote: live ? null :
+                  (note) => unawaited(_jumpToNote(note)),
+            )
+          else
+            const SizedBox(
+              height: 120,
+              child: Center(
+                child: Text('Rilevamento delle prime note…')),
+            ),
+          const SizedBox(height: 13),
+          for (final part in _parts)
+            ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(switch(part.family) {
+                InstrumentFamily.melody => Icons.music_note,
+                InstrumentFamily.harmony => Icons.piano,
+                InstrumentFamily.bass => Icons.graphic_eq,
+                InstrumentFamily.drums => Icons.album_outlined,
+              }, color: const Color(0xFF80DCC2)),
+              title: Text(part.name),
+              trailing: Text('${part.notes.length} note',
+                style: const TextStyle(fontSize: 12)),
+              onTap: live ? null : () {
+                _selectFamily(part.family);
+                setState(() => _pageIndex = 1);
+              },
+            ),
+          if (!live)
+            Wrap(spacing: 8, runSpacing: 8, children: [
+              FilledButton.tonalIcon(
+                onPressed: () => setState(() => _pageIndex = 1),
+                icon: const Icon(Icons.library_music),
+                label: const Text('Apri spartito'),
+              ),
+              OutlinedButton.icon(
+                onPressed: () => setState(() => _pageIndex = 3),
+                icon: const Icon(Icons.multitrack_audio),
+                label: const Text('Ascolta le parti'),
+              ),
+            ]),
+        ],
+        if (!live && score == null)
+          const Padding(
+            padding: EdgeInsets.only(top: 15),
+            child: Text(
+              'La trascrizione Live si aggiorna ogni pochi secondi; '
+              'quando termini, viene completata sull’intera registrazione.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Color(0xFF8DA4AD),
+                fontSize: 12),
+            ),
+          ),
+      ],
     );
   }
 
@@ -1973,6 +2259,17 @@ class _StudioPageState extends State<StudioPage> {
   }
 
   Widget _noteLabView() {
+    if (_recording) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(20),
+          child: Text(
+            'La partitura Live si aggiorna automaticamente. '
+            'Termina l’ascolto per modificarla in NoteLab.',
+          ),
+        ),
+      );
+    }
     final score = _score;
     if (score == null) return const Center(
       child: Padding(

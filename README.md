@@ -1,4 +1,25 @@
-# AmpyScore Studio 1.0 — tempo variabile, MIDI SoundFont, partitura sincronizzata
+# AmpyScore AI 1.1 — ascolta musica, riconosci le parti, leggi gli spartiti
+
+**Scopo originario:** il microfono ascolta una canzone; l'app riconosce le parti musicali e le trascrive in **pentagrammi simultanei separati**, per poi lasciare ascoltare, correggere ed esportare ogni parte. La voce cantata è una parte del progetto, non una semplice funzionalità karaoke. La modalità Studio completa la trascrizione e permette le correzioni con NoteLab.
+
+## Flusso principale, adesso funzionante
+
+1. **Ascolta** è la prima schermata. Premi **Ascolta dal microfono**: l'app registra PCM16 localmente, salva un WAV completo su disco e ogni pochi secondi aggiorna una **partitura multirigo provvisoria** (basso, armonia, melodia, transienti/percussioni).
+2. **Termina e completa lo spartito**: la registrazione viene finalizzata e sottoposta all'analisi completa, con riconoscimento di eventi/tempi approssimativi, notazione per parte e navigazione tra le battute.
+3. **Apri una canzone** offre la stessa trascrizione automatica Studio a partire da file audio supportati dal dispositivo (MP3, M4A, FLAC, WAV e altri). Non serve un secondo pulsante per generare lo spartito.
+4. **Spartito** mette al centro la partitura multitraccia, la riproduzione e la barra di avanzamento. **NoteLab** modifica le note. **Tracce** consente ascolto e mixer per famiglia stimata, controlli GM, filtri e modalità senza voce sperimentale. **Opzioni** contiene buffer, demo e configurazioni.
+
+La registrazione Live usa `record.startStream(pcm16bits)`, un **writer WAV persistente con snapshot**, decodifica in isolate e un merge temporale senza creare note doppie ai bordi delle finestre. Salva l'intera esecuzione, non soltanto gli ultimi secondi. Non carica la registrazione completa in memoria e non invia l'audio a un server.
+
+### Stato effettivo dei riconoscimenti
+
+**Già funzionante:** analisi spettrale locale di 4 registri, note con inizio/durata stimati, primi pentagrammi Live, rianalisi completa Studio, controlli di tempo e notazione, modifiche/esportazioni già disponibili in v1.0.
+
+**Non ancora ottenuto:** vera separazione IA affidabile dei singoli strumenti/voce, identificazione del timbro come sax/piano/chitarra, accordi polifonici completi, tonalità robusta e notazione perfetta di pause/battute da qualsiasi canzone. Le percentuali interne sono **confidenze euristiche**, non un tasso d'accuratezza verificato. Una registrazione mono da microfono contiene una miscela, non quattro tracce audio realmente separate.
+
+Per integrare separazione autentica senza trasformare il telefono in un server, vedi `docs/ROADMAP_CORE.md`: modelli on-device con inferenza verificata e una suite di confronto note/stem. La modalità Live nasce volutamente con analisi DSP leggera, mentre la futura Studio neurale eseguirà l'elaborazione più pesante.
+
+---
 
 Applicazione Flutter gratuita e open source (MIT), elaborazione audio musicale locale. **Il motore di trascrizione non è ancora un modello AI di source separation**: i registri basso/armonia/melodia/percussioni sono stime da frequenze, perciò le note non saranno fedeli a un brano jazz polifonico complesso come *Take Five*. Non confondere qualità del sintetizzatore MIDI (timbrica) con accuratezza delle note estratte.
 
