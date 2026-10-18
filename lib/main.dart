@@ -646,6 +646,184 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  Future<void> _prepareMetronome() async {
+    if (!_metronomeEnabled || _trackPath == null) return;
+    await _metronomePlayer.stop();
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File('${dir.path}/metro_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    final writer = await file.open(mode: FileMode.write);
+    Uint8List? header;
+    var pcmLength = 0;
+    try {
+      await writer.writeFrom(Uint8List(44));
+      const segment = 12.0;
+      final duration = _durationSeconds + .3;
+      for (var start = 0.0; start < duration; start += segment) {
+        final chunk = await compute(
+          MetronomeSynth.render,
+          MetronomeSettings(
+            bpm: _metronomeBpm,
+            subdivisions: _metronomeSubdivisions,
+            durationSeconds: math.min(segment, duration - start),
+            beatsPerBar: _beatsPerBar,
+            startSeconds: start,
+          ),
+        );
+        header ??= Uint8List.fromList(chunk.sublist(0, 44));
+        await writer.writeFrom(chunk, 44);
+        pcmLength += chunk.length - 44;
+      }
+      if (header == null) return;
+      final view = ByteData.sublistView(header);
+      view.setUint32(4, pcmLength + 36, Endian.little);
+      view.setUint32(40, pcmLength, Endian.little);
+      await writer.setPosition(0);
+      await writer.writeFrom(header);
+      await writer.flush();
+    } finally {
+      await writer.close();
+    }
+    await _metronomePlayer.setFilePath(file.path);
+    await _metronomePlayer.setVolume(_metronomeVolume);
+    _metronomeReady = true;
+  }
+
+  Future<void> _configureMetronome({
+    bool? enabled,
+    int? bpm,
+    int? subdivisions,
+  }) async {
+    if (_busy) return;
+    final previousMode = _playing ? _mode : null;
+    final oldPosition = _cursor;
+    if (previousMode != null) await _pauseTransport();
+    if (mounted) {
+      setState(() {
+        if (enabled != null) _metronomeEnabled = enabled;
+        if (bpm != null) _metronomeBpm = bpm;
+        if (subdivisions != null) _metronomeSubdivisions = subdivisions;
+        _metronomeReady = false;
+      });
+    }
+    if (_metronomeEnabled && _trackPath != null) {
+      await _prepareMetronome();
+      await _metronomePlayer.seek(oldPosition);
+    } else {
+      await _metronomePlayer.pause();
+    }
+    if (previousMode != null) {
+      await _togglePlaybackMode(previousMode);
+    }
+  }
+
+  Future<void> _jumpToNote(ScoreNote note) async {
+    if (_busy || _trackPath == null) return;
+    final mode = _mode ??
+        (_midiReady ? _PlaybackMode.both : _PlaybackMode.original);
+    await _pauseTransport();
+    if (mounted) setState(() {
+      _selectedNoteId = note.id;
+      _selectedFamily = note.family;
+    });
+    await _seekTransport(Duration(
+      microseconds: (_score!.timeOf(note) * 1000000).round(),
+    ));
+    await _togglePlaybackMode(mode);
+  }
+
+  Future<void> _checkForUpdates() => _execute(() async {
+    final update = await AppUpdates.check();
+    if (!mounted) return;
+    final target = update?.url ?? AppUpdates.releases;
+    final title = update == null
+        ? 'Nessuna release pubblicata'
+        : update.hasNewVersion
+            ? 'Disponibile ${update.version}'
+            : 'Versione aggiornata';
+    final open = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: Text(title),
+        content: Text(update == null
+          ? 'Puoi verificare le release GitHub.'
+          : 'Le nuove versioni si installano dal browser. '
+            'Per aggiornare mantenendo i dati serve la stessa firma APK.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false),
+              child: const Text('Chiudi')),
+          FilledButton(onPressed: () => Navigator.pop(context, true),
+              child: const Text('Apri GitHub')),
+        ],
+      ),
+    );
+    if (open == true) await AppUpdates.openReleases(url: target);
+  });
+
+  Future<void> _findSongOnline() async {
+    if (_searching) return;
+    setState(() => _searching = true);
+    try {
+      final candidates = await SongLookup.find(
+        '${_songQuery.text.trim()}.mp3');
+      if (!mounted) return;
+      setState(() => _songResults = candidates);
+      await showDialog<void>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Corrispondenze per titolo · ${_songResults.length}'),
+          content: SizedBox(
+            width: 460,
+            child: candidates.isEmpty
+              ? const Text('Nessuna corrispondenza trovata.')
+              : ListView(
+                shrinkWrap: true,
+                children: [
+                  for (final song in candidates)
+                    ListTile(
+                      title: Text(song.title),
+                      subtitle: Text(song.artist),
+                      trailing: PopupMenuButton<String>(
+                        tooltip: 'Apri riferimenti online',
+                        icon: const Icon(Icons.open_in_new),
+                        onSelected: (choice) {
+                          final url = choice == 'info'
+                              ? song.url
+                              : Uri.https('www.google.com', '/search', {
+                                  'q': '${song.title} ${song.artist} '
+                                      'spartito MusicXML',
+                                });
+                          unawaited(launchUrl(url,
+                              mode: LaunchMode.externalApplication));
+                        },
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(value: 'info',
+                              child: Text('Dettagli brano')),
+                          PopupMenuItem(value: 'score',
+                              child: Text('Cerca spartito')),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context),
+                child: const Text('Chiudi')),
+          ],
+        ),
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ricerca: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _searching = false);
+    }
+  }
+
   Future<void> _analyse() => _execute(() async {
     await _analyseInternal();
     _buildScoreAfterAnalysis();
