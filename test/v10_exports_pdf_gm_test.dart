@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:ampy_score_ai/audio/gm_catalog.dart';
 import 'package:ampy_score_ai/audio/playback_tuning.dart';
@@ -62,5 +63,7 @@ void main() {
       title:'Studio PDF test',sepia:true);
     expect(String.fromCharCodes(pdf.sublist(0,5)), '%PDF-');
     expect(pdf.length,greaterThan(1000));
+    await Directory('build').create(recursive:true);
+    await File('build/ampyscore_score_smoke.pdf').writeAsBytes(pdf);
   });
 }
