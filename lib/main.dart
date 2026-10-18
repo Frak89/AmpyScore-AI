@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:audio_decoder/audio_decoder.dart';
 import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
@@ -17,6 +18,7 @@ import 'package:url_launcher/url_launcher.dart';
 import 'audio/wav_engine.dart';
 import 'audio/wav_window_reader.dart';
 import 'audio/midi_engine.dart';
+import 'audio/playback_tuning.dart';
 import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
 import 'audio/instrument_heuristics.dart';
@@ -82,6 +84,10 @@ class _StudioPageState extends State<StudioPage> {
   final _player = AudioPlayer(); // Original recording.
   final _midiPlayer = AudioPlayer(); // Muted audio clock when SF2 is active.
   final _synth = MidiPro();
+  final _prefs = SharedPreferencesAsync();
+  late final Future<void> _settingsReady;
+  Timer? _speedDebounce;
+  Future<void> _speedQueue = Future<void>.value();
   int? _soundfontId;
   bool _soundfontReady = false;
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
@@ -159,10 +165,15 @@ class _StudioPageState extends State<StudioPage> {
   int _activeIndex = -1;
   double _originalVolume = 1.0;
   double _midiVolume = 0.65;
+  double _playbackSpeed = PlaybackTuning.normalSpeed;
+  int _midiBufferFrames = PlaybackTuning.defaultBufferFrames;
+  int _midiSampleRate = PlaybackTuning.defaultSampleRate;
+  bool _reconfiguringSoundfont = false;
 
   @override
   void initState() {
     super.initState();
+    _settingsReady = _loadAudioTuning();
     _transportTimer = Timer.periodic(
       const Duration(milliseconds: 80),
       (_) => _updateTransport(),
@@ -174,6 +185,7 @@ class _StudioPageState extends State<StudioPage> {
   @override
   void dispose() {
     _transportTimer?.cancel();
+    _speedDebounce?.cancel();
     _apiKey.dispose();
     _songQuery.dispose();
     if (_immersive) {
@@ -773,9 +785,10 @@ class _StudioPageState extends State<StudioPage> {
       List<InstrumentPart> parts, int bpm) async {
     if (!Platform.isAndroid) return;
     try {
+      await _settingsReady;
       if (!_synth.isInitialized) {
-        await _synth.init(sampleRate: 44100,
-            bufferSize: 512, polyphony: 96);
+        await _synth.init(sampleRate: _midiSampleRate,
+            bufferSize: _midiBufferFrames, polyphony: 96);
       }
       _soundfontId ??= await _synth.loadSoundfontAsset(
         assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
@@ -784,6 +797,7 @@ class _StudioPageState extends State<StudioPage> {
           beatsPerBar: _beatsPerBar, gains: _partGains),
         sfId: _soundfontId!,
       );
+      await _synth.setMidiTempo(_playbackSpeed);
       await _synth.setMasterGain(_midiVolume);
       await _synth.setReverb(enabled: true,
         roomSize: .26, damping: .55, width: .7, level: .12);
@@ -903,6 +917,120 @@ class _StudioPageState extends State<StudioPage> {
     _lastMixPath = newFile.path;
     if (old != null) {
       try { await File(old).delete(); } catch (_) {}
+    }
+  }
+
+  Future<void> _loadAudioTuning() async {
+    try {
+      final speed = PlaybackTuning.speed(
+        await _prefs.getDouble('audio_speed') ?? 1);
+      final frames = await _prefs.getInt('gm_buffer_frames') ??
+          PlaybackTuning.defaultBufferFrames;
+      final sampleRate = await _prefs.getInt('gm_sample_rate') ??
+          PlaybackTuning.defaultSampleRate;
+      if (!mounted) return;
+      setState(() {
+        _playbackSpeed = speed;
+        _midiBufferFrames = PlaybackTuning.supportsBuffer(frames)
+            ? frames : PlaybackTuning.defaultBufferFrames;
+        _midiSampleRate = PlaybackTuning.supportsSampleRate(sampleRate)
+            ? sampleRate : PlaybackTuning.defaultSampleRate;
+      });
+      await _setAllPlayerSpeeds(speed);
+    } catch (error) {
+      if (mounted) setState(() =>
+        _status = 'Impostazioni audio predefinite: $error');
+    }
+  }
+
+  Future<void> _setAllPlayerSpeeds(double speed) async {
+    await Future.wait([
+      _player.setSpeed(speed),
+      _midiPlayer.setSpeed(speed),
+      _metronomePlayer.setSpeed(speed),
+      _stemPlayer.setSpeed(speed),
+    ]);
+    // GM MIDI-file playback is currently Android-only.
+    if (_soundfontReady && Platform.isAndroid) {
+      await _synth.setMidiTempo(speed);
+    }
+  }
+
+  void _requestSpeed(double selected, {bool immediate = false}) {
+    if (!mounted || _busy || _reconfiguringSoundfont) return;
+    final speed = PlaybackTuning.speed(selected);
+    setState(() => _playbackSpeed = speed);
+    _speedDebounce?.cancel();
+    if (immediate) {
+      _queueSpeed(speed);
+    } else {
+      _speedDebounce = Timer(const Duration(milliseconds: 90),
+          () => _queueSpeed(_playbackSpeed));
+    }
+  }
+
+  void _queueSpeed(double speed) {
+    // Serialize native player calls. The latest user selection wins.
+    _speedQueue = _speedQueue.then((_) async {
+      final latest = _playbackSpeed;
+      await _setAllPlayerSpeeds(latest);
+      await _prefs.setDouble('audio_speed', latest);
+    }).catchError((Object error) {
+      if (mounted) setState(() =>
+          _status = 'Velocità audio non applicabile: $error');
+    });
+  }
+
+  Future<void> _applySoundfontSettings({
+    int? bufferFrames, int? sampleRate,
+  }) async {
+    if (_busy || _reconfiguringSoundfont) return;
+    final newBuffer = bufferFrames ?? _midiBufferFrames;
+    final newRate = sampleRate ?? _midiSampleRate;
+    if (!PlaybackTuning.supportsBuffer(newBuffer) ||
+        !PlaybackTuning.supportsSampleRate(newRate)) return;
+    if (newBuffer == _midiBufferFrames && newRate == _midiSampleRate) {
+      return;
+    }
+    final wasPlaying = _playing;
+    final previousMode = _mode;
+    final previousCursor = _cursor;
+    setState(() => _reconfiguringSoundfont = true);
+    try {
+      await _pauseTransport();
+      // Reinitialization is required by the native FluidSynth buffer API.
+      if (_synth.isInitialized) await _synth.dispose();
+      _soundfontId = null;
+      _soundfontReady = false;
+      if (!mounted) return;
+      setState(() {
+        _midiBufferFrames = newBuffer;
+        _midiSampleRate = newRate;
+      });
+      await _prefs.setInt('gm_buffer_frames', newBuffer);
+      await _prefs.setInt('gm_sample_rate', newRate);
+      if (_midiReady && _parts.isNotEmpty) {
+        final edited = _editedParts();
+        await _loadSoundfontMidi(edited,
+            _score?.bpm ?? _rhythm?.bpm ?? 120);
+        if (_soundfontReady) {
+          await _renderSilentMidiClock(_durationSeconds);
+        } else {
+          await _renderMultiPreview(edited, _durationSeconds);
+        }
+      }
+      await _setAllPlayerSpeeds(_playbackSpeed);
+      await _seekTransport(previousCursor);
+      if (mounted) setState(() =>
+          _status = 'SoundFont: $newRate Hz · buffer $newBuffer frame');
+    } catch (error) {
+      if (mounted) setState(() =>
+          _status = 'Configurazione audio: $error');
+    } finally {
+      if (mounted) setState(() => _reconfiguringSoundfont = false);
+    }
+    if (wasPlaying && previousMode != null && mounted) {
+      await _togglePlaybackMode(previousMode);
     }
   }
 
