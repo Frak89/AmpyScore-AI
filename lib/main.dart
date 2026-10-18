@@ -1738,7 +1738,42 @@ class _StudioPageState extends State<StudioPage> {
             icon: const Icon(Icons.music_note),
           ),
         ]),
-        const SizedBox(height: 13),
+        const SizedBox(height: 12),
+        if (_trackPath != null) ...[
+          Row(children: [
+            const Icon(Icons.speed, size: 20),
+            const SizedBox(width: 9),
+            const Expanded(
+              child: Text('Velocità',
+                style: TextStyle(fontWeight: FontWeight.w600))),
+            Text(PlaybackTuning.speedLabel(_playbackSpeed),
+              style: const TextStyle(fontSize: 18,
+                  fontWeight: FontWeight.w700)),
+            const SizedBox(width: 8),
+            OutlinedButton(
+              onPressed: _busy || _reconfiguringSoundfont
+                  ? null : () => _requestSpeed(1, immediate: true),
+              child: const Text('1×'),
+            ),
+          ]),
+          Slider(
+            min: PlaybackTuning.minSpeed,
+            max: PlaybackTuning.maxSpeed,
+            value: _playbackSpeed,
+            label: PlaybackTuning.speedLabel(_playbackSpeed),
+            onChanged: _busy || _reconfiguringSoundfont
+                ? null : (value) => _requestSpeed(value),
+            onChangeEnd: _busy || _reconfiguringSoundfont
+                ? null : (value) => _requestSpeed(value,
+                    immediate: true),
+          ),
+          Row(children: [
+            const Text('0,25×', style: TextStyle(fontSize: 11)),
+            const Spacer(),
+            const Text('4×', style: TextStyle(fontSize: 11)),
+          ]),
+          const SizedBox(height: 5),
+        ],
         _volumeRow(
           'Brano',
           _originalVolume,
@@ -2171,6 +2206,74 @@ class _StudioPageState extends State<StudioPage> {
               unawaited(_configureMetronome());
             }
           },
+        ),
+      ),
+      const SizedBox(height: 12),
+      _section(
+        icon: Icons.settings_input_component,
+        title: 'Audio sperimentale',
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (_reconfiguringSoundfont)
+              const LinearProgressIndicator(minHeight: 3),
+            const SizedBox(height: 8),
+            const Text('Buffer SoundFont MIDI',
+                style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Wrap(spacing: 6, runSpacing: 4, children: [
+              for (final frames in PlaybackTuning.bufferFrames)
+                ChoiceChip(
+                  selected: _midiBufferFrames == frames,
+                  label: Text('$frames'),
+                  onSelected: (_busy || _reconfiguringSoundfont ||
+                      !Platform.isAndroid)
+                    ? null : (_) => unawaited(
+                        _applySoundfontSettings(bufferFrames: frames)),
+                ),
+            ]),
+            const SizedBox(height: 9),
+            Text(
+              'Latenza teorica del singolo blocco: '
+              '${PlaybackTuning.nominalMilliseconds(_midiBufferFrames,
+                 _midiSampleRate).toStringAsFixed(1)} ms',
+              style: const TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 14),
+            const Text('Campionamento sintetizzatore',
+              style: TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            SegmentedButton<int>(
+              segments: const [
+                ButtonSegment(value: 44100, label: Text('44,1 kHz')),
+                ButtonSegment(value: 48000, label: Text('48 kHz')),
+              ],
+              selected: {_midiSampleRate},
+              onSelectionChanged: (_busy || _reconfiguringSoundfont ||
+                  !Platform.isAndroid)
+                ? null : (values) => unawaited(
+                    _applySoundfontSettings(sampleRate: values.first)),
+            ),
+            const SizedBox(height: 9),
+            Align(
+              alignment: Alignment.centerRight,
+              child: TextButton.icon(
+                onPressed: (_busy || _reconfiguringSoundfont ||
+                    !Platform.isAndroid) ? null : () => unawaited(
+                      _applySoundfontSettings(
+                        bufferFrames: PlaybackTuning.defaultBufferFrames,
+                        sampleRate: PlaybackTuning.defaultSampleRate)),
+                icon: const Icon(Icons.restart_alt),
+                label: const Text('Predefiniti'),
+              ),
+            ),
+            const Text(
+              'Buffer elevato: meno scatti, più latenza. '
+              '44,1/48 kHz regolano il MIDI campionato, '
+              'non la qualità della registrazione originale.',
+              style: TextStyle(fontSize: 11),
+            ),
+          ],
         ),
       ),
       const SizedBox(height: 12),
