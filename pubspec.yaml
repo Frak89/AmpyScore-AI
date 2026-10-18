@@ -1,7 +1,7 @@
 name: ampy_score_ai
-description: "AmpyScore AI: offline score studio, editable 4/4 partitures and experimental frequency stems."
+description: "AmpyScore AI: listen live or import music and generate editable multi-staff scores offline."
 publish_to: none
-version: 1.0.0+10
+version: 1.1.0+11
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
