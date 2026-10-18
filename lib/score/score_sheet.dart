@@ -39,6 +39,7 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
   static const _rowHeight = 92.0;
   static const _pageBars = 8;
   int _firstBar = 0;
+  DateTime _lastFollow = DateTime.fromMillisecondsSinceEpoch(0);
 
   @override
   void initState() {
@@ -59,6 +60,25 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
     if (bar < _firstBar || bar >= _firstBar + _pageBars) {
       setState(() => _firstBar = (bar ~/ _pageBars) * _pageBars);
       if (_scroll.hasClients) _scroll.jumpTo(0);
+    }
+    final now = DateTime.now();
+    if (now.difference(_lastFollow).inMilliseconds >= 220) {
+      _lastFollow = now;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroll.hasClients) return;
+        final x = _lead +
+          (seconds * widget.project.bpm * ticksPerQuarter / 60 -
+           _firstBar * widget.project.barTicks) /
+              widget.project.barTicks * _barWidth;
+        final viewport = _scroll.position.viewportDimension;
+        final target = (x - viewport * .42)
+            .clamp(0.0, _scroll.position.maxScrollExtent).toDouble();
+        if ((_scroll.offset - target).abs() > 65) {
+          _scroll.animateTo(target,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic);
+        }
+      });
     }
   }
 
