@@ -4,7 +4,7 @@ class PlaybackTuning {
   static const double maxSpeed = 4.0;
   static const double normalSpeed = 1.0;
 
-  static const List<int> bufferFrames = [128, 256, 512, 1024, 2048];
+  static const List<int> bufferFrames = [128, 256, 512, 1024, 2048, 4096];
   static const List<int> sampleRates = [44100, 48000];
   static const int defaultBufferFrames = 512;
   static const int defaultSampleRate = 44100;

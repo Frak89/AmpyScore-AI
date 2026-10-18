@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:printing/printing.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:audio_decoder/audio_decoder.dart';
 import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
@@ -21,6 +23,8 @@ import 'audio/midi_engine.dart';
 import 'audio/playback_tuning.dart';
 import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
+import 'audio/gm_catalog.dart';
+import 'audio/stereo_center_voice.dart';
 import 'audio/instrument_heuristics.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
@@ -28,6 +32,7 @@ import 'audio/stem_extractor.dart';
 import 'audio/stereo_vocal_reducer.dart';
 import 'audio/band_focus_renderer.dart';
 import 'score/score_engine.dart';
+import 'score/score_pdf.dart';
 import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
 import 'score/reference_score.dart';
@@ -118,15 +123,8 @@ class _StudioPageState extends State<StudioPage> {
     InstrumentFamily.harmony: 0,
     InstrumentFamily.melody: 65,
   };
-  static const Map<int, String> _gmNames = {
-    0: 'Pianoforte', 1: 'Pianoforte brillante',
-    24: 'Chitarra nylon', 25: 'Chitarra acustica',
-    26: 'Chitarra elettrica', 32: 'Contrabbasso',
-    33: 'Basso elettrico', 40: 'Violino',
-    48: 'Archi', 56: 'Tromba', 57: 'Trombone',
-    65: 'Sax contralto', 66: 'Sax tenore',
-    73: 'Flauto', 80: 'Sintetizzatore',
-  };
+  int? _percussionKeyOverride;
+  bool _semitoneLayer = false;
   final Map<InstrumentFamily, InstrumentGuess> _instrumentGuesses = {};
   final Map<InstrumentFamily, double> _partGains = {
     for (final family in InstrumentFamily.values) family: 0.90,
@@ -546,7 +544,18 @@ class _StudioPageState extends State<StudioPage> {
   List<InstrumentPart> _withPrograms(List<InstrumentPart> parts) => [
     for (final p in parts)
       InstrumentPart(
-        family: p.family, notes: p.notes, confidence: p.confidence,
+        family: p.family,
+        notes: [
+          for (final note in p.notes)
+            DetectedNote(
+              midi: p.percussion && _percussionKeyOverride != null
+                  ? _percussionKeyOverride! : note.midi,
+              startSeconds: note.startSeconds,
+              endSeconds: note.endSeconds,
+              confidence: note.confidence,
+            ),
+        ],
+        confidence: p.confidence,
         programOverride: _gmPrograms[p.family] ?? p.programOverride,
         signalLevel: p.signalLevel,
       ),
@@ -602,6 +611,120 @@ class _StudioPageState extends State<StudioPage> {
     _tempoOverride = _tempoSlider.round();
     await _analyse();
   }
+
+  Future<void> _exportPdf() => _execute(() async {
+    final score = _score;
+    if (score == null) return;
+    final pdf = await ScorePdf.render(
+      score, title: _trackName,
+      sepia: _paperTone == PaperTone.sepia);
+    await Printing.sharePdf(
+      bytes: pdf,
+      filename: 'AmpyScore_partitura.pdf',
+    );
+    if (mounted) setState(() =>
+        _status = 'Partitura PDF pronta per stampa o salvataggio.');
+  });
+
+  Future<WavWindowReader> _stereoForExports() async {
+    final original = _trackPath;
+    if (original == null) throw StateError('Apri un brano.');
+    if (_stereoDecodePath != null &&
+        await File(_stereoDecodePath!).exists()) {
+      return WavWindowReader.open(File(_stereoDecodePath!));
+    }
+    try {
+      final reader = await WavWindowReader.open(File(original));
+      if (reader.channels != 2) throw const FormatException(
+        'Il brano è mono. Serve uno stereo con voce centrale.');
+      return reader;
+    } on FormatException {
+      final dir = await getApplicationDocumentsDirectory();
+      final path = '${dir.path}/stereo_for_export_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav';
+      await AudioDecoder.convertToWav(original, path,
+        sampleRate: 44100, channels: 2, bitDepth: 16);
+      final reader = await WavWindowReader.open(File(path));
+      _stereoDecodePath = path;
+      return reader;
+    }
+  }
+
+  Future<void> _exportAudio(String choice) => _execute(() async {
+    if (_trackPath == null) throw StateError('Importa un brano.');
+    final dir = await getTemporaryDirectory();
+    final stem = choice.startsWith('band_')
+      ? choice.substring(5)
+      : choice;
+    final path = '${dir.path}/AmpyScore_$stem.wav';
+    final target = File(path);
+    if (choice == 'instrumental') {
+      if (_instrumentalPath != null &&
+          await File(_instrumentalPath!).exists()) {
+        // Share existing full-song WAV directly, avoid another decoding pass.
+        await SharePlus.instance.share(
+          ShareParams(files: [XFile(_instrumentalPath!,
+              mimeType: 'audio/wav')],
+            fileNameOverrides: ['AmpyScore_base_strumentale.wav']));
+        return;
+      }
+      final reader = await _stereoForExports();
+      if (reader.channels != 2) {
+        throw const FormatException('Base senza voce: serve audio stereo.');
+      }
+      await StereoVocalReducer.export(reader,target,
+        strength: _vocalStrength);
+    } else if (choice == 'voice') {
+      final reader = await _stereoForExports();
+      if (reader.channels != 2) {
+        throw const FormatException('Solo voce: serve audio stereo.');
+      }
+      await CenterVoiceExporter.export(reader,target);
+    } else if (choice.startsWith('band_')) {
+      final family = InstrumentFamily.values
+          .where((f) => f.name == stem).firstOrNull;
+      if (family == null) throw StateError('Parte non valida.');
+      final focus = switch (family) {
+        InstrumentFamily.bass => FocusStem.bass,
+        InstrumentFamily.harmony => FocusStem.middle,
+        InstrumentFamily.melody => FocusStem.vocalCandidate,
+        InstrumentFamily.drums => FocusStem.percussion,
+      };
+      final sourcePath = _analysisPath;
+      if (sourcePath == null) throw StateError('Analizza un brano.');
+      await BandFocusRenderer.export(
+        await WavWindowReader.open(File(sourcePath)),target,focus);
+    } else {
+      throw StateError('Esportazione audio non valida.');
+    }
+    final result = await SharePlus.instance.share(ShareParams(
+      files: [XFile(target.path,mimeType:'audio/wav')],
+      fileNameOverrides: ['AmpyScore_$stem.wav'],
+      title: 'Esporta traccia WAV',
+    ));
+    if (mounted) setState(() =>
+      _status = result.status == ShareResultStatus.success
+        ? 'Traccia WAV condivisa.'
+        : 'Traccia WAV pronta: ${target.path}');
+  });
+
+  Future<void> _exportSoloMidi(InstrumentFamily family) => _execute(() async {
+    final match=_withPrograms(_editedParts())
+        .where((part)=>part.family==family).firstOrNull;
+    if(match==null) return;
+    final data=MultiTrackMidi.export([match],
+      bpm:_score?.bpm??_rhythm?.bpm??120,
+      beatsPerBar:_beatsPerBar,
+      gains:_partGains,
+      semitoneLayer:_semitoneLayer);
+    final saved=await FilePicker.saveFile(
+      dialogTitle:'Esporta MIDI della singola parte',
+      fileName:'AmpyScore_${family.name}_solo.mid',
+      type:FileType.custom,allowedExtensions:['mid'],
+      bytes:data);
+    if(mounted && saved!=null) setState(() =>
+      _status='MIDI singola parte esportato.');
+  });
 
   Future<void> _exportMusicXml() => _execute(() async {
     final score = _score;
@@ -794,7 +917,8 @@ class _StudioPageState extends State<StudioPage> {
         assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
       await _synth.loadMidiData(
         data: MultiTrackMidi.export(_withPrograms(parts), bpm: bpm,
-          beatsPerBar: _beatsPerBar, gains: _partGains),
+          beatsPerBar: _beatsPerBar, gains: _partGains,
+          semitoneLayer: _semitoneLayer),
         sfId: _soundfontId!,
       );
       await _synth.setMidiTempo(_playbackSpeed);
@@ -1447,11 +1571,11 @@ class _StudioPageState extends State<StudioPage> {
         final score = _score;
     final bytes = score != null
         ? MultiTrackMidi.export(_withPrograms(_editedParts()), bpm: score.bpm,
-            beatsPerBar: _beatsPerBar)
+            beatsPerBar: _beatsPerBar, semitoneLayer: _semitoneLayer)
         : _parts.isEmpty
             ? MidiEngine.exportMidi(_notes)
             : MultiTrackMidi.export(_withPrograms(_parts), bpm: _rhythm?.bpm ?? 120,
-            beatsPerBar: _beatsPerBar);
+            beatsPerBar: _beatsPerBar, semitoneLayer: _semitoneLayer);
         final output = await FilePicker.saveFile(
           dialogTitle: 'Esporta la trascrizione MIDI',
           fileName: _parts.isEmpty
@@ -1807,6 +1931,11 @@ class _StudioPageState extends State<StudioPage> {
             icon: const Icon(Icons.description_outlined),
             label: const Text('MusicXML'),
           ),
+          OutlinedButton.icon(
+            onPressed: score != null && !_busy ? _exportPdf : null,
+            icon: const Icon(Icons.picture_as_pdf_outlined),
+            label: const Text('PDF'),
+          ),
           if (ready)
             TextButton(
               onPressed: _analyse,
@@ -1959,34 +2088,124 @@ class _StudioPageState extends State<StudioPage> {
               ),
         ],
         if (_parts.isNotEmpty) ...[
-          const SizedBox(height: 8),
-          for (final part in _parts)
-            if (!part.percussion)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: Row(children: [
-                  Expanded(child: Text(part.name,
-                    maxLines: 1, overflow: TextOverflow.ellipsis)),
-                  const SizedBox(width: 8),
-                  DropdownButton<int>(
-                    value: _gmPrograms[part.family] ?? part.midiProgram,
-                    items: [
-                      for (final entry in _gmNames.entries)
-                        DropdownMenuItem<int>(
-                          value: entry.key,
-                          child: Text(entry.value,
-                            style: const TextStyle(fontSize: 12)),
+          const SizedBox(height: 12),
+          _section(
+            icon: Icons.piano,
+            title: 'Strumenti General MIDI (128)',
+            child: Column(children: [
+              for (final part in _parts)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 7),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(part.name,style:const TextStyle(
+                        fontWeight: FontWeight.w600)),
+                      const SizedBox(height: 5),
+                      if (!part.percussion)
+                        DropdownButtonFormField<int>(
+                          initialValue: (_gmPrograms[part.family] ??
+                              part.midiProgram).clamp(0,127),
+                          isExpanded: true,
+                          decoration: const InputDecoration(
+                            border: OutlineInputBorder(),
+                            labelText: 'Timbro MIDI (128 strumenti)'),
+                          items: [
+                            for (var i=0;i<GmCatalog.programs.length;i++)
+                              DropdownMenuItem<int>(value:i,
+                                child: Text(GmCatalog.programLabel(i),
+                                  maxLines:1,overflow:TextOverflow.ellipsis)),
+                          ],
+                          onChanged:_busy?null:(program) {
+                            if(program==null)return;
+                            setState(()=>_gmPrograms[part.family]=program);
+                            unawaited(_remix());
+                          },
+                        )
+                      else
+                        DropdownButtonFormField<int>(
+                          initialValue:_percussionKeyOverride??-1,
+                          isExpanded:true,
+                          decoration:const InputDecoration(
+                            border:OutlineInputBorder(),
+                            labelText:'Percussioni GM · canale 10'),
+                          items:[
+                            const DropdownMenuItem<int>(value:-1,
+                              child:Text('Automatico · note rilevate')),
+                            for(final entry in GmCatalog.percussion.entries)
+                              DropdownMenuItem<int>(value:entry.key,
+                                child:Text(GmCatalog.drumLabel(entry.key),
+                                  maxLines:1,overflow:TextOverflow.ellipsis)),
+                          ],
+                          onChanged:_busy?null:(key){
+                            if(key==null)return;
+                            setState(()=>_percussionKeyOverride=
+                                key<0?null:key);
+                            unawaited(_remix());
+                          },
                         ),
+                      Align(alignment:Alignment.centerRight,
+                        child:TextButton.icon(
+                          onPressed:_busy?null:()=>unawaited(
+                            _exportSoloMidi(part.family)),
+                          icon:const Icon(Icons.save_alt),
+                          label:const Text('Esporta MIDI traccia'),
+                        )),
                     ],
-                    onChanged: _busy ? null : (program) {
-                      if (program == null) return;
-                      setState(() => _gmPrograms[part.family] = program);
-                      unawaited(_remix());
-                    },
+                  ),
+                ),
+              SwitchListTile.adaptive(
+                contentPadding:EdgeInsets.zero,
+                title:const Text('Rinforzo cromatico +1 semitono'),
+                subtitle:const Text('Sperimentale, volume 16%. '
+                    'Può produrre dissonanza; disattivato di default.',
+                  style:TextStyle(fontSize:11)),
+                value:_semitoneLayer,
+                onChanged:_busy?null:(value){
+                  setState(()=>_semitoneLayer=value);
+                  unawaited(_remix());
+                },
+              ),
+            ]),
+          ),
+        ],
+        if (_trackPath != null)
+          _section(
+            icon: Icons.file_download_outlined,
+            title: 'Esporta audio (WAV)',
+            child: Column(
+              crossAxisAlignment:CrossAxisAlignment.stretch,
+              children:[
+                Wrap(spacing:8,runSpacing:8,children:[
+                  OutlinedButton.icon(
+                    onPressed:_busy?null:()=>
+                      unawaited(_exportAudio('instrumental')),
+                    icon:const Icon(Icons.music_note),
+                    label:const Text('Base senza voce'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed:_busy?null:()=>
+                      unawaited(_exportAudio('voice')),
+                    icon:const Icon(Icons.record_voice_over),
+                    label:const Text('Solo voce stimata'),
                   ),
                 ]),
-              ),
-        ],
+                const SizedBox(height:7),
+                for(final part in _parts)
+                  ListTile(
+                    dense:true,
+                    title:Text('${part.name} · WAV filtrato'),
+                    trailing:const Icon(Icons.download_outlined),
+                    onTap:_busy?null:()=>unawaited(
+                      _exportAudio('band_${part.family.name}')),
+                  ),
+                const Text('Filtri di frequenza, non separazione IA: '
+                  'voce e strumenti sovrapposti possono rimanere.',
+                  style:TextStyle(fontSize:11)),
+              ],
+            ),
+          ),
+        const SizedBox(height: 10),
         if (_trackPath != null) ...[
           const SizedBox(height: 12),
           _section(

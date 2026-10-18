@@ -22,7 +22,7 @@ void main() {
 
   test('SoundFont buffer and output sample rate stay in safe presets', () {
     expect(PlaybackTuning.bufferFrames,
-        [128, 256, 512, 1024, 2048]);
+        [128, 256, 512, 1024, 2048, 4096]);
     expect(PlaybackTuning.supportsBuffer(512), isTrue);
     expect(PlaybackTuning.supportsBuffer(384), isFalse);
     expect(PlaybackTuning.supportsSampleRate(44100), isTrue);
