@@ -1157,6 +1157,13 @@ class _StudioPageState extends State<StudioPage> {
             onPressed: _playing ? _pauseTransport : null,
             icon: const Icon(Icons.pause),
           ),
+          IconButton.filledTonal(
+            tooltip: 'Ascolta singola nota',
+            onPressed: !_busy && _activeIndex >= 0 &&
+                    _activeIndex < _notes.length
+                ? () => _playOneNote(_activeIndex) : null,
+            icon: const Icon(Icons.music_note),
+          ),
         ]),
         const SizedBox(height: 13),
         _volumeRow(
