@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:audio_decoder/audio_decoder.dart';
 import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
@@ -21,6 +22,8 @@ import 'audio/multitrack_engine.dart';
 import 'audio/multitrack_midi.dart';
 import 'audio/rhythm_engine.dart';
 import 'audio/stem_extractor.dart';
+import 'audio/stereo_vocal_reducer.dart';
+import 'audio/band_focus_renderer.dart';
 import 'score/score_engine.dart';
 import 'score/score_sheet.dart';
 import 'score/note_lab.dart';
@@ -139,6 +142,10 @@ class _StudioPageState extends State<StudioPage> {
   bool _playing = false;
   bool _midiReady = false;
   bool _originalUsesFallback = false;
+  bool _vocalReduced = false;
+  double _vocalStrength = .84;
+  String? _instrumentalPath;
+  String? _stereoDecodePath;
   double _analysisProgress = 0;
   double _analysisDuration = 0;
   int _beatsPerBar = 4;
@@ -221,6 +228,9 @@ class _StudioPageState extends State<StudioPage> {
       _trackPath = path;
       _analysisPath = analysisPath ?? path;
       _trackName = name;
+      _instrumentalPath = null;
+      _stereoDecodePath = null;
+      _vocalReduced = false;
       _beatsPerBar = RegExp(r'take[ _-]?five|take[ _-]?5',
           caseSensitive: false).hasMatch(name) ? 5 : 4;
       _songQuery.text = SongLookup.filenameTitle(name) ?? '';
@@ -546,18 +556,99 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _prepareStem() async {
     final path = _analysisPath;
-    if (path == null) throw StateError('Carica prima un brano.');
+    if (path == null) throw StateError('Apri prima un brano.');
     await _stemPlayer.stop();
-    final source = await File(path).readAsBytes();
-    final bytes = await compute(
-      StemExtractor.focus,
-      StemRequest(source, _focusStem),
-    );
     final dir = await getApplicationDocumentsDirectory();
-    final output = File('${dir.path}/ampyscore_filtro_${_focusStem.name}.wav');
-    await output.writeAsBytes(bytes, flush: true);
-    await _stemPlayer.setFilePath(output.path);
-    _stemPath = output.path;
+    final target = File('${dir.path}/focus_${_focusStem.name}_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+    final reader = await WavWindowReader.open(File(path));
+    var lastReport = 0.0;
+    await BandFocusRenderer.export(reader, target, _focusStem,
+      progress: (fraction) {
+        if (mounted && (fraction == 1 || fraction > lastReport + .08)) {
+          lastReport = fraction;
+          setState(() {
+            _analysisProgress = fraction;
+            _status = 'Filtro ${(100*fraction).round()}%';
+          });
+        }
+      });
+    await _stemPlayer.setFilePath(target.path);
+    _stemPath = target.path;
+    if (mounted) setState(() => _analysisProgress = 1);
+  }
+
+  /// Reduces stereo center information: no model, not a true vocal stem.
+  Future<void> _toggleInstrumental() => _execute(() async {
+    if (_trackPath == null) return;
+    final at = _cursor;
+    await _pauseTransport();
+    if (!_vocalReduced && _instrumentalPath == null) {
+      final dir = await getApplicationDocumentsDirectory();
+      final original = File(_trackPath!);
+      WavWindowReader reader;
+      try {
+        reader = await WavWindowReader.open(original);
+        if (reader.channels != 2) {
+          throw const FormatException('File sorgente mono');
+        }
+      } catch (_) {
+        // Keep stereo and sample rate; never use MONO 16kHz analysis WAV.
+        final stereo = File('${dir.path}/vocal_decode_'
+          '${DateTime.now().microsecondsSinceEpoch}.wav');
+        await AudioDecoder.convertToWav(
+          original.path, stereo.path,
+          sampleRate: 44100, channels: 2, bitDepth: 16,
+        );
+        reader = await WavWindowReader.open(stereo);
+        _stereoDecodePath = stereo.path;
+      }
+      if (reader.channels != 2) {
+        throw const FormatException(
+          'Serve audio stereo. La voce mono richiede un modello IA.');
+      }
+      final out = File('${dir.path}/ampyscore_instrumental_'
+        '${DateTime.now().microsecondsSinceEpoch}.wav');
+      var lastReport = 0.0;
+      await StereoVocalReducer.export(
+        reader, out, strength: _vocalStrength,
+        progress: (value) {
+          if (mounted && (value == 1 || value > lastReport + .07)) {
+            lastReport = value;
+            setState(() {
+              _analysisProgress = value;
+              _status = 'Riduzione voce ${(100 * value).round()}%';
+            });
+          }
+        },
+      );
+      _instrumentalPath = out.path;
+    }
+    final next = !_vocalReduced;
+    await _player.setFilePath(next ? _instrumentalPath! : _trackPath!);
+    await _player.setVolume(_originalVolume);
+    await _player.seek(at);
+    if (mounted) setState(() {
+      _vocalReduced = next;
+      _cursor = at;
+      _analysisProgress = 1;
+      _status = next
+          ? 'Base stereo senza centro: alcuni strumenti '
+            'potrebbero attenuarsi.'
+          : 'Riproduzione originale ripristinata.';
+    });
+  });
+
+  Future<void> _changeVocalStrength(double value) async {
+    if (_busy) return;
+    setState(() {
+      _vocalStrength = value;
+      _instrumentalPath = null;
+    });
+    if (_vocalReduced) {
+      setState(() => _vocalReduced = false);
+      await _toggleInstrumental();
+    }
   }
 
   Future<void> _playStem() => _execute(() async {
@@ -593,7 +684,8 @@ class _StudioPageState extends State<StudioPage> {
     if (!Platform.isAndroid) return;
     try {
       if (!_synth.isInitialized) {
-        await _synth.init(sampleRate: 44100, polyphony: 128);
+        await _synth.init(sampleRate: 44100,
+            bufferSize: 512, polyphony: 96);
       }
       _soundfontId ??= await _synth.loadSoundfontAsset(
         assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
@@ -603,6 +695,9 @@ class _StudioPageState extends State<StudioPage> {
         sfId: _soundfontId!,
       );
       await _synth.setMasterGain(_midiVolume);
+      await _synth.setReverb(enabled: true,
+        roomSize: .26, damping: .55, width: .7, level: .12);
+      await _synth.setChorus(enabled: false);
       _soundfontReady = true;
       await _midiPlayer.setVolume(0);
     } catch (error) {
@@ -1570,6 +1665,42 @@ class _StudioPageState extends State<StudioPage> {
                   ),
                 ]),
               ),
+        ],
+        if (_trackPath != null) ...[
+          const SizedBox(height: 12),
+          _section(
+            icon: Icons.record_voice_over_outlined,
+            title: 'Base senza voce',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(children: [
+                  Expanded(child: Text(_vocalReduced
+                      ? 'Base strumentale (centro stereo)'
+                      : 'Brano originale')),
+                  Switch.adaptive(
+                    value: _vocalReduced,
+                    onChanged: _busy ? null : (_) =>
+                      unawaited(_toggleInstrumental()),
+                  ),
+                ]),
+                Slider(
+                  min: .35, max: 1.0,
+                  value: _vocalStrength,
+                  label: '${(_vocalStrength * 100).round()}%',
+                  onChanged: _busy ? null : (v) =>
+                      setState(() => _vocalStrength = v),
+                  onChangeEnd: _busy ? null : (v) =>
+                      unawaited(_changeVocalStrength(v)),
+                ),
+                const Text(
+                  'Riduce il centro stereo; non separa la voce con IA. '
+                  'Funziona meglio con canto centrale e accompagnamento laterale.',
+                  style: TextStyle(fontSize: 11),
+                ),
+              ],
+            ),
+          ),
         ],
         const SizedBox(height: 12),
         ExpansionTile(
