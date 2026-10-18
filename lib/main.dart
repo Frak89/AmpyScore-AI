@@ -105,6 +105,7 @@ class _StudioPageState extends State<StudioPage> {
   double _tempoSlider = 120;
   FocusStem _focusStem = FocusStem.vocalCandidate;
   String? _stemPath;
+  final Map<FocusStem, String> _focusCache = {};
   String? _lastMixPath;
   final Map<InstrumentFamily, int> _gmPrograms = {
     InstrumentFamily.bass: 32,
@@ -243,6 +244,7 @@ class _StudioPageState extends State<StudioPage> {
       _score = null;
       _selectedNoteId = null;
       _stemPath = null;
+      _focusCache.clear();
       _selectedFamily = null;
       _soloFamily = null;
       _savedBeforeSolo = null;
@@ -601,6 +603,12 @@ class _StudioPageState extends State<StudioPage> {
     final path = _analysisPath;
     if (path == null) throw StateError('Apri prima un brano.');
     await _stemPlayer.stop();
+    final existing = _focusCache[_focusStem];
+    if (existing != null && await File(existing).exists()) {
+      await _stemPlayer.setFilePath(existing);
+      _stemPath = existing;
+      return;
+    }
     final dir = await getApplicationDocumentsDirectory();
     final target = File('${dir.path}/focus_${_focusStem.name}_'
         '${DateTime.now().microsecondsSinceEpoch}.wav');
@@ -618,6 +626,7 @@ class _StudioPageState extends State<StudioPage> {
       });
     await _stemPlayer.setFilePath(target.path);
     _stemPath = target.path;
+    _focusCache[_focusStem] = target.path;
     if (mounted) setState(() => _analysisProgress = 1);
   }
 
@@ -699,6 +708,19 @@ class _StudioPageState extends State<StudioPage> {
       setState(() => _vocalReduced = false);
       await _toggleInstrumental();
     }
+  }
+
+  void _listenFamilyBand(InstrumentFamily family) {
+    if (_busy || _recording) return;
+    setState(() {
+      _focusStem = switch (family) {
+        InstrumentFamily.bass => FocusStem.bass,
+        InstrumentFamily.harmony => FocusStem.middle,
+        InstrumentFamily.melody => FocusStem.vocalCandidate,
+        InstrumentFamily.drums => FocusStem.percussion,
+      };
+    });
+    unawaited(_playStem());
   }
 
   Future<void> _playStem() => _execute(() async {
@@ -1678,6 +1700,7 @@ class _StudioPageState extends State<StudioPage> {
             enabled: !_busy && !_recording,
             onSelect: _selectFamily,
             onSolo: (family) => unawaited(_toggleSolo(family)),
+            onListenBand: _listenFamilyBand,
             onGain: (family, value) => setState(() {
               _partGains[family] = value;
               if (_savedBeforeSolo != null) {
