@@ -2,6 +2,21 @@
 
 Applicazione Flutter gratuita e open source (MIT), elaborazione audio musicale locale. **Il motore di trascrizione non è ancora un modello AI di source separation**: i registri basso/armonia/melodia/percussioni sono stime da frequenze, perciò le note non saranno fedeli a un brano jazz polifonico complesso come *Take Five*. Non confondere qualità del sintetizzatore MIDI (timbrica) con accuratezza delle note estratte.
 
+
+## v0.8 — ascolto migliore, riduzione vocale e prestazioni
+
+- **Tracce → Base senza voce:** filtro offline da stereo con attenuazione del centro (intensità regolabile) e recupero parziale dei bassi. Elaborazione a blocchi per tutta la canzone, il brano originale rimane invariato. Se i due canali sono quasi uguali, il filtro rifiuta la conversione invece di produrre una base inutile. Il risultato è compatibile anche con un'uscita mono; la riduzione vocale non può garantire una voce pulita, né separare sax, piano e basso sovrapposti. L'app distingue chiaramente questo **metodo spaziale** dalla futura separazione neurale.
+- **Tracce → Cuffie per registro:** riproduci la fascia di frequenza corrispondente a un registro stimato (basso, armonia, melodia, transienti) oppure usa **Solo MIDI** per ascoltare soltanto gli eventi MIDI ricostruiti. Questi NON sono stem autentici: note e armoniche di strumenti diversi possono sovrapporsi.
+- **Strumenti suggeriti automaticamente:** toni GM scelti usando caratteristiche elementari della trascrizione (articolazione e registro), sempre presentati come ipotesi, e sostituibili manualmente.
+- **Auto bilancia MIDI:** stima iniziale del volume relativo di ciascun registro attraverso energia spettrale; il comando reimposta i quattro volumi, con possibilità di perfezionarli a mano. Non è un algoritmo di loudness professionale su tracce separate.
+- **Qualità del suono MIDI:** FluidSynth mantiene il SoundFont GeneralUser GS campionato; il buffer audio Android passa a 512 frame (anziché 64) per ridurre i glitch e l'uso di CPU. Riverbero molto leggero, chorus disattivato.
+- **Analisi più rapida:** 2 isolate concorrenti per blocchi di 16 s, cache dei fattori FFT, ricerca dei picchi senza ordinamenti ad ogni frame e normalizzazione automatica. L'analisi non deve più saturare il thread che disegna lo spartito. I filtri frequenziali usano blocchi con overlap anti-click e caching su disco.
+- **Rendering più efficiente:** aggiornamento della partitura limitato alle modifiche effettive, animazione nota disattivata quando non selezionata, `RepaintBoundary` dedicato al rigo.
+
+**GPU:** la grafica Flutter può usare il renderer accelerato del dispositivo, ma **non è attiva inferenza GPU per separazione audio**, perché l'app non include ancora un modello neurale utilizzabile. ONNX Runtime NNAPI Android/Core ML iOS funzionano soltanto con modelli supportati e conversioni/verifiche specifiche: accendere un interruttore senza tale motore non migliora né garantisce qualità. Il lavoro v0.8 accelera invece la trascrizione CPU in modo reale. <https://onnxruntime.ai/docs/tutorials/mobile/>
+
+Per la funzione `Base senza voce` l'audio stereo con voce centrale può migliorare, ma se anche batteria, basso, pianoforte o sax sono al centro, questi strumenti saranno attenuati. Per file mono serve una vera AI source separation da implementare.
+
 ## Problemi corretti
 
 - **Analisi di durata completa:** eliminata la troncatura a 40 secondi per tutti gli audio. `WavWindowReader` legge soltanto finestre PCM da 16 secondi, con sovrapposizione, mediante operazioni su file. L'analisi prosegue automaticamente fino alla fine, mostrando progresso percentuale. Un brano importato viene riprodotto dal **file originale MP3/AAC/stereo**: la conversione PCM mono è solo per il riconoscimento note. Nei telefoni con codec non supportato resta un fallback WAV, qualitativamente peggiore e identificabile tramite errore/avviso.

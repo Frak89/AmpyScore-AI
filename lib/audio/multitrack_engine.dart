@@ -12,12 +12,14 @@ class InstrumentPart {
     required this.notes,
     required this.confidence,
     this.programOverride,
+    this.signalLevel = .6,
   });
 
   final InstrumentFamily family;
   final List<DetectedNote> notes;
   final double confidence;
   final int? programOverride;
+  final double signalLevel; // relative band strength, not true stem loudness.
 
   String get id => family.name;
   String get name => switch (family) {
@@ -126,26 +128,53 @@ class MultiTrackAnalyzer {
       lastHit = f.time;
     }
 
+    // Relative dominant-band energy. Informative for an INITIAL mixer gain
+    // only: overlapping harmonics are not actual isolated instrument RMS.
+    double strength(_Pitch? Function(_Frame) select) {
+      var total = 0.0;
+      for (final frame in frames) {
+        final pitch = select(frame);
+        if (pitch != null) {
+          total += frame.rms * pitch.fundamental /
+              (pitch.fundamental + 8);
+        }
+      }
+      return total / math.max(1, frames.length);
+    }
+    final bassPower = strength((f) => f.bass);
+    final midPower = strength((f) => f.harmony);
+    final highPower = strength((f) => f.melody);
+    final drumPower = frames.where((f) => f.transient)
+        .fold<double>(0, (sum, f) => sum + f.rms) /
+        math.max(1, frames.length);
+    final peakPower = [bassPower, midPower, highPower, drumPower, .001]
+        .reduce(math.max);
+    double level(double power) => (.12 + .83 *
+        math.sqrt((power / peakPower).clamp(0.0, 1.0))).clamp(.12, .95);
     final candidateParts = [
       InstrumentPart(
         family: InstrumentFamily.bass,
         notes: bassNotes,
         confidence: 0.60,
+        signalLevel: level(bassPower),
       ),
       InstrumentPart(
         family: InstrumentFamily.harmony,
         notes: harmonyNotes,
         confidence: 0.43,
+        signalLevel: level(midPower),
       ),
       InstrumentPart(
         family: InstrumentFamily.melody,
         notes: melodyNotes,
         confidence: 0.54,
+        signalLevel: level(highPower),
       ),
       InstrumentPart(
         family: InstrumentFamily.drums,
         notes: drumNotes,
         confidence: 0.35,
+        signalLevel: level(drumPower),
       ),
     ];
     return MultiTrackResult(
@@ -206,7 +235,7 @@ class MultiTrackAnalyzer {
     double rms,
   ) {
     if (rms < 0.016) return null;
-    final candidates = <_Pitch>[];
+    _Pitch? best;
     var maxInBand = 0.0;
     for (var midi = low; midi <= high; midi++) {
       final frequency = 440 * math.pow(2, (midi - 69) / 12);
@@ -221,10 +250,11 @@ class MultiTrackAnalyzer {
         harmonics += _peak(spectrum, bin * n) / (n * n);
       }
       final value = fundamental + harmonics * 0.14;
-      candidates.add(_Pitch(midi, value, fundamental));
+      if (best == null || value > best.score) {
+        best = _Pitch(midi, value, fundamental);
+      }
     }
-    candidates.sort((a, b) => b.score.compareTo(a.score));
-    final best = candidates.first;
+    if (best == null) return null;
     if (best.fundamental < 4.0 || best.fundamental < maxInBand * 0.58) {
       return null;
     }
@@ -254,6 +284,11 @@ class MultiTrackAnalyzer {
     return peak;
   }
 
+  static final Map<int, (double, double)> _twiddle = {
+    for (var len = 2; len <= _fftSize; len *= 2)
+      len: (math.cos(-2 * math.pi / len), math.sin(-2 * math.pi / len)),
+  };
+
   static Float64List _magnitudeSpectrum(Float64List input) {
     final real = Float64List.fromList(input);
     final imag = Float64List(_fftSize);
@@ -272,9 +307,7 @@ class MultiTrackAnalyzer {
       }
     }
     for (var len = 2; len <= _fftSize; len <<= 1) {
-      final angle = -2 * math.pi / len;
-      final wRe = math.cos(angle);
-      final wIm = math.sin(angle);
+      final (wRe, wIm) = _twiddle[len]!;
       for (var i = 0; i < _fftSize; i += len) {
         var xRe = 1.0;
         var xIm = 0.0;

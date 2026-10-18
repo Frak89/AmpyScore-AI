@@ -15,6 +15,8 @@ class MultiTrackPanel extends StatelessWidget {
     required this.enabled,
     required this.onSelect,
     required this.onSolo,
+    required this.onListenBand,
+    required this.onAutoBalance,
     required this.onGain,
     required this.onGainDone,
   });
@@ -27,6 +29,8 @@ class MultiTrackPanel extends StatelessWidget {
   final bool enabled;
   final ValueChanged<InstrumentFamily> onSelect;
   final ValueChanged<InstrumentFamily> onSolo;
+  final ValueChanged<InstrumentFamily> onListenBand;
+  final VoidCallback onAutoBalance;
   final void Function(InstrumentFamily, double) onGain;
   final VoidCallback onGainDone;
 
@@ -39,7 +43,17 @@ class MultiTrackPanel extends StatelessWidget {
           'Riconoscimento per registro · stima sperimentale.',
           style: TextStyle(color: Color(0xFFB7C7D0), fontSize: 12),
         ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 8),
+        if (parts.isNotEmpty)
+          Align(
+            alignment: Alignment.centerRight,
+            child: OutlinedButton.icon(
+              onPressed: enabled ? onAutoBalance : null,
+              icon: const Icon(Icons.auto_fix_high, size: 18),
+              label: const Text('Auto bilancia MIDI'),
+            ),
+          ),
+        const SizedBox(height: 8),
         if (parts.isEmpty)
           const Text('Carica una demo multistrumento e premi Analizza WAV.')
         else
@@ -55,15 +69,24 @@ class MultiTrackPanel extends StatelessWidget {
                             ? (_) => onSelect(part.family) : null,
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    IconButton(
+                      tooltip: 'Ascolta frequenze del registro (non isolamento IA)',
+                      onPressed: enabled
+                          ? () => onListenBand(part.family) : null,
+                      icon: const Icon(Icons.headphones),
+                    ),
+                    const SizedBox(width: 5),
                     OutlinedButton(
                       onPressed: enabled
                           ? () => onSolo(part.family) : null,
                       child: Text(
-                        solo == part.family ? 'Ripristina' : 'Solo',
+                        solo == part.family ? 'Ripristina' : 'Solo MIDI',
                       ),
                     ),
                   ]),
+                  Text('Livello stimato del registro: '
+                     '${(part.signalLevel * 100).round()}%',
+                     style: const TextStyle(fontSize: 11)),
                   Row(children: [
                     Expanded(child: Slider(
                       value: (gains[part.family] ?? .9).clamp(0.0, 1.0),

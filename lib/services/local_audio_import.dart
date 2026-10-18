@@ -2,7 +2,6 @@ import 'dart:io';
 import 'package:audio_decoder/audio_decoder.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
-import '../audio/wav_engine.dart';
 import '../audio/wav_window_reader.dart';
 
 class LocalAudioFile {
@@ -65,7 +64,7 @@ class LocalAudioImport {
       // handles 24/32-bit/float WAV as well as MP3/M4A/AAC/FLAC/etc.
       if (suffix == '.wav' && await copied.length() <= maxDecodedBytes) {
         try {
-          WavAudio.decode(await copied.readAsBytes());
+          await WavWindowReader.open(copied);
           return LocalAudioFile(
             playbackPath: copied.path,
             analysisWavPath: copied.path,

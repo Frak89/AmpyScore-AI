@@ -45,20 +45,27 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
   void initState() {
     super.initState();
     _blink = AnimationController(vsync: this,
-        duration: const Duration(milliseconds: 680))
-      ..repeat(reverse: true);
+        duration: const Duration(milliseconds: 680));
+    if (widget.activeNoteId != null) _blink.repeat(reverse: true);
   }
 
   @override
   void didUpdateWidget(covariant StudioScore oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.project != widget.project) _firstBar = 0;
+    if (oldWidget.activeNoteId != widget.activeNoteId) {
+      if (widget.activeNoteId != null) {
+        _blink.repeat(reverse: true);
+      } else {
+        _blink.stop();
+      }
+    }
     final seconds = widget.positionSeconds;
     final bars = widget.project.beatsPerBar;
     final bar = (seconds * widget.project.bpm / (60 * bars))
         .floor().clamp(0, widget.project.barCount - 1);
     if (bar < _firstBar || bar >= _firstBar + _pageBars) {
-      setState(() => _firstBar = (bar ~/ _pageBars) * _pageBars);
+      _firstBar = (bar ~/ _pageBars) * _pageBars;
       if (_scroll.hasClients) _scroll.jumpTo(0);
     }
     final now = DateTime.now();
@@ -156,7 +163,8 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
         child: painted,
       ),
     );
-    return DecoratedBox(
+    return RepaintBoundary(
+      child: DecoratedBox(
       decoration: BoxDecoration(
         color: paper,
         border: Border.all(
@@ -243,6 +251,7 @@ class _StudioScoreState extends State<StudioScore> with SingleTickerProviderStat
               ),
             ),
         ]),
+      ),
       ),
     );
   }
@@ -492,5 +501,5 @@ class _StudioPainter extends CustomPainter {
   bool shouldRepaint(covariant _StudioPainter old) =>
       old.score != score || old.position != position ||
       old.ink != ink || old.selected != selected || old.blink != blink ||
-      true; // Edited ScoreProject may retain identity; always redraw.
+      old.firstBar != firstBar || old.lastBar != lastBar;
 }
