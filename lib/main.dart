@@ -630,21 +630,23 @@ class _StudioPageState extends State<StudioPage> {
       final dir = await getApplicationDocumentsDirectory();
       final original = File(_trackPath!);
       WavWindowReader reader;
-      try {
-        reader = await WavWindowReader.open(original);
-        if (reader.channels != 2) {
-          throw const FormatException('File sorgente mono');
+      if (_stereoDecodePath != null &&
+          await File(_stereoDecodePath!).exists()) {
+        reader = await WavWindowReader.open(File(_stereoDecodePath!));
+      } else {
+        try {
+          reader = await WavWindowReader.open(original);
+        } on FormatException {
+          // Keep stereo and source fidelity. The 16kHz analysis WAV is mono.
+          final stereo = File('${dir.path}/vocal_decode_'
+            '${DateTime.now().microsecondsSinceEpoch}.wav');
+          await AudioDecoder.convertToWav(
+            original.path, stereo.path,
+            sampleRate: 44100, channels: 2, bitDepth: 16,
+          );
+          reader = await WavWindowReader.open(stereo);
+          _stereoDecodePath = stereo.path;
         }
-      } catch (_) {
-        // Keep stereo and sample rate; never use MONO 16kHz analysis WAV.
-        final stereo = File('${dir.path}/vocal_decode_'
-          '${DateTime.now().microsecondsSinceEpoch}.wav');
-        await AudioDecoder.convertToWav(
-          original.path, stereo.path,
-          sampleRate: 44100, channels: 2, bitDepth: 16,
-        );
-        reader = await WavWindowReader.open(stereo);
-        _stereoDecodePath = stereo.path;
       }
       if (reader.channels != 2) {
         throw const FormatException(
@@ -684,10 +686,15 @@ class _StudioPageState extends State<StudioPage> {
 
   Future<void> _changeVocalStrength(double value) async {
     if (_busy) return;
+    final old = _instrumentalPath;
     setState(() {
       _vocalStrength = value;
       _instrumentalPath = null;
     });
+    // Remove previous derivative to avoid silently filling user storage.
+    if (old != null && !_vocalReduced) {
+      try { await File(old).delete(); } catch (_) {}
+    }
     if (_vocalReduced) {
       setState(() => _vocalReduced = false);
       await _toggleInstrumental();
