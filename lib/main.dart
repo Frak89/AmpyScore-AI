@@ -8,6 +8,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
+import 'package:flutter_midi_pro/flutter_midi_pro.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:record/record.dart';
 import 'package:flutter/services.dart';
@@ -75,7 +76,10 @@ class StudioPage extends StatefulWidget {
 class _StudioPageState extends State<StudioPage> {
   final _recorder = AudioRecorder();
   final _player = AudioPlayer(); // Original recording.
-  final _midiPlayer = AudioPlayer(); // Synthesized preview WAV.
+  final _midiPlayer = AudioPlayer(); // Muted audio clock when SF2 is active.
+  final _synth = MidiPro();
+  int? _soundfontId;
+  bool _soundfontReady = false;
   final _notePlayer = AudioPlayer(); // One MIDI pitch at a time.
   final _stemPlayer = AudioPlayer(); // Optional spectral focus WAV.
   final _metronomePlayer = AudioPlayer();
@@ -153,6 +157,7 @@ class _StudioPageState extends State<StudioPage> {
     _recorder.dispose();
     _player.dispose();
     _midiPlayer.dispose();
+    if (_synth.isInitialized) unawaited(_synth.dispose());
     _notePlayer.dispose();
     _stemPlayer.dispose();
     _metronomePlayer.dispose();
@@ -180,6 +185,8 @@ class _StudioPageState extends State<StudioPage> {
     await _pauseTransport();
     await _player.stop();
     await _midiPlayer.stop();
+    if (_soundfontReady) await _synth.stopMidi();
+    _soundfontReady = false;
     await _notePlayer.stop();
     await _stemPlayer.stop();
     await _metronomePlayer.stop();
@@ -380,7 +387,10 @@ class _StudioPageState extends State<StudioPage> {
     final rhythm = RhythmAnalyzer.estimate(parts);
     final allNotes = parts.any((p) => p.notes.isNotEmpty);
     _analysisDuration = duration;
-    if (allNotes) await _renderMultiPreview(parts, duration);
+    if (allNotes) {
+      await _renderMultiPreview(parts, duration);
+      await _loadSoundfontMidi(parts, rhythm.bpm);
+    }
     await _player.seek(Duration.zero);
     if (mounted) setState(() {
       _parts = parts;
@@ -477,6 +487,7 @@ class _StudioPageState extends State<StudioPage> {
     await _midiPlayer.stop();
     final parts = _editedParts();
     await _renderMultiPreview(parts, score.durationSeconds);
+    await _loadSoundfontMidi(parts, score.bpm);
     await _seekTransport(oldCursor);
     if (mounted) {
       setState(() {
@@ -551,6 +562,31 @@ class _StudioPageState extends State<StudioPage> {
 
   /// Writes a full-length PCM comparison to disk without allocating a
   /// full-song Float32List or cutting the MIDI at 40 seconds.
+  Future<void> _loadSoundfontMidi(
+      List<InstrumentPart> parts, int bpm) async {
+    if (!Platform.isAndroid) return;
+    try {
+      if (!_synth.isInitialized) {
+        await _synth.init(sampleRate: 44100, polyphony: 128);
+      }
+      _soundfontId ??= await _synth.loadSoundfontAsset(
+        assetPath: 'assets/soundfonts/GeneralUser-GS.sf2');
+      await _synth.loadMidiData(
+        data: MultiTrackMidi.export(parts, bpm: bpm,
+          beatsPerBar: _beatsPerBar, gains: _partGains),
+        sfId: _soundfontId!,
+      );
+      await _synth.setMasterGain(_midiVolume);
+      _soundfontReady = true;
+      await _midiPlayer.setVolume(0);
+    } catch (error) {
+      _soundfontReady = false;
+      await _midiPlayer.setVolume(_midiVolume);
+      if (mounted) setState(() =>
+        _status = 'SoundFont non disponibile; audio di riserva: $error');
+    }
+  }
+
   Future<void> _renderMultiPreview(
     List<InstrumentPart> parts, double duration,
   ) async {
@@ -603,7 +639,7 @@ class _StudioPageState extends State<StudioPage> {
     }
     final old = _lastMixPath;
     await _midiPlayer.setFilePath(newFile.path);
-    await _midiPlayer.setVolume(_midiVolume);
+    await _midiPlayer.setVolume(_soundfontReady ? 0 : _midiVolume);
     _lastMixPath = newFile.path;
     if (old != null) {
       try { await File(old).delete(); } catch (_) {}
@@ -682,6 +718,7 @@ class _StudioPageState extends State<StudioPage> {
       });
     }
     await Future.wait([_player.pause(), _midiPlayer.pause(), _metronomePlayer.pause()]);
+    if (_soundfontReady) await _synth.pauseMidi();
   }
 
   Future<void> _seekTransport(Duration cursor) async {
@@ -696,6 +733,11 @@ class _StudioPageState extends State<StudioPage> {
     try {
       await _player.seek(newTime);
       if (_midiReady) await _midiPlayer.seek(newTime);
+      if (_soundfontReady) {
+        final tick = (newTime.inMicroseconds / 1000000 *
+            ((_score?.bpm ?? _rhythm?.bpm ?? 120) * 480 / 60)).round();
+        await _synth.seekMidi(tick);
+      }
       if (_metronomeEnabled && _metronomeReady) {
         await _metronomePlayer.seek(newTime);
       }
@@ -732,6 +774,7 @@ class _StudioPageState extends State<StudioPage> {
       }
       if (requested != _PlaybackMode.original) {
         unawaited(_midiPlayer.play());
+        if (_soundfontReady) await _synth.playMidi();
       }
       if (_metronomeEnabled && _metronomeReady) {
         unawaited(_metronomePlayer.play());
@@ -790,8 +833,11 @@ class _StudioPageState extends State<StudioPage> {
         final oldCursor = _cursor;
         await _pauseTransport();
         await _midiPlayer.stop();
-        await _renderMultiPreview(_editedParts(),
+        final adjusted = _editedParts();
+        await _renderMultiPreview(adjusted,
             _score?.durationSeconds ?? _durationSeconds);
+        await _loadSoundfontMidi(adjusted,
+            _score?.bpm ?? _rhythm?.bpm ?? 120);
         await _seekTransport(oldCursor);
         if (resume && previousMode != null && mounted) {
           setState(() {
@@ -803,6 +849,7 @@ class _StudioPageState extends State<StudioPage> {
           }
           if (previousMode != _PlaybackMode.original) {
             unawaited(_midiPlayer.play());
+            if (_soundfontReady) unawaited(_synth.playMidi());
           }
         }
       });
@@ -1133,7 +1180,8 @@ class _StudioPageState extends State<StudioPage> {
           Icons.piano,
           (value) {
             setState(() => _midiVolume = value);
-            unawaited(_midiPlayer.setVolume(value));
+            unawaited(_midiPlayer.setVolume(_soundfontReady ? 0 : value));
+            if (_soundfontReady) unawaited(_synth.setMasterGain(value));
             unawaited(_notePlayer.setVolume(value));
           },
         ),
