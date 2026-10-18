@@ -1577,10 +1577,11 @@ class _StudioPageState extends State<StudioPage> {
       allowedExtensions: ['musicxml', 'xml'],
     );
     if (file == null) return;
-    if ((await file.length()) > 12 * 1024 * 1024) {
+    final raw = await file.readAsBytes();
+    if (raw.length > 12 * 1024 * 1024) {
       throw const FormatException('MusicXML troppo grande.');
     }
-    final xml = utf8.decode(await file.readAsBytes(), allowMalformed: false);
+    final xml = utf8.decode(raw, allowMalformed: false);
     final comparison = ReferenceScore.compare(project, xml);
     if (!mounted) return;
     final action = await showDialog<bool>(
