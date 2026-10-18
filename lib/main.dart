@@ -970,11 +970,11 @@ class _StudioPageState extends State<StudioPage> {
   }
 
   void _queueSpeed(double speed) {
-    // Serialize native player calls. The latest user selection wins.
+    // Serialize native player calls. Skip superseded thumb positions.
     _speedQueue = _speedQueue.then((_) async {
-      final latest = _playbackSpeed;
-      await _setAllPlayerSpeeds(latest);
-      await _prefs.setDouble('audio_speed', latest);
+      if (speed != _playbackSpeed) return;
+      await _setAllPlayerSpeeds(speed);
+      await _prefs.setDouble('audio_speed', speed);
     }).catchError((Object error) {
       if (mounted) setState(() =>
           _status = 'Velocità audio non applicabile: $error');
