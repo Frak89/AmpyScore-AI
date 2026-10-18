@@ -11,11 +11,13 @@ class InstrumentPart {
     required this.family,
     required this.notes,
     required this.confidence,
+    this.programOverride,
   });
 
   final InstrumentFamily family;
   final List<DetectedNote> notes;
   final double confidence;
+  final int? programOverride;
 
   String get id => family.name;
   String get name => switch (family) {
@@ -30,10 +32,10 @@ class InstrumentPart {
         InstrumentFamily.melody => 0,
         InstrumentFamily.drums => 9,
       };
-  int get midiProgram => switch (family) {
-        InstrumentFamily.bass => 33,
+  int get midiProgram => programOverride ?? switch (family) {
+        InstrumentFamily.bass => 32, // Acoustic bass.
         InstrumentFamily.harmony => 0,
-        InstrumentFamily.melody => 80,
+        InstrumentFamily.melody => 65, // General MIDI alto sax, changeable in Tracks.
         InstrumentFamily.drums => 0,
       };
   bool get percussion => family == InstrumentFamily.drums;
