@@ -731,496 +731,421 @@ class _StudioPageState extends State<StudioPage> {
 
   @override
   Widget build(BuildContext context) {
-    final canPlay = !_busy && !_recording && _trackPath != null;
-    final canAnalyze = canPlay;
+    final ready = !_busy && !_recording && _trackPath != null;
     return Scaffold(
       appBar: AppBar(
         backgroundColor: const Color(0xFF101820),
         title: const Row(children: [
           Icon(Icons.graphic_eq_rounded, color: Color(0xFF62DFC3)),
           SizedBox(width: 10),
-          Text('AmpyScore AI', style: TextStyle(fontWeight: FontWeight.w700)),
+          Text('AmpyScore Studio',
+              style: TextStyle(fontWeight: FontWeight.w700, fontSize: 20)),
         ]),
-        actions: const [
-          Padding(
-            padding: EdgeInsets.only(right: 18),
-            child: Center(
-              child: Text('v0.4', style: TextStyle(color: Color(0xFF9DAABA))),
-            ),
+        actions: [
+          PopupMenuButton<bool>(
+            tooltip: 'Modalità di analisi',
+            icon: const Icon(Icons.tune),
+            onSelected: (mode) {
+              if (_busy || _recording) return;
+              setState(() => _multitrackMode = mode);
+              if (_trackPath != null) unawaited(_analyse());
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: true, child: Text('Analisi multitraccia')),
+              PopupMenuItem(
+                value: false, child: Text('Analisi melodia')),
+            ],
           ),
+        ],
+      ),
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _pageIndex,
+        onDestinationSelected: (value) =>
+            setState(() => _pageIndex = value),
+        destinations: const [
+          NavigationDestination(icon: Icon(Icons.library_music_outlined),
+              selectedIcon: Icon(Icons.library_music), label: 'Studio'),
+          NavigationDestination(icon: Icon(Icons.edit_note_outlined),
+              selectedIcon: Icon(Icons.edit_note), label: 'NoteLab'),
+          NavigationDestination(icon: Icon(Icons.tune_outlined),
+              selectedIcon: Icon(Icons.tune), label: 'Tracce'),
         ],
       ),
       body: SafeArea(
         child: ListView(
-          padding: const EdgeInsets.fromLTRB(18, 12, 18, 42),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 36),
           children: [
-            const Text(
-              'Il tuo studio musicale,\nsul telefono.',
-              style: TextStyle(fontSize: 28, fontWeight: FontWeight.w800,
-                  height: 1.12),
-            ),
-            const SizedBox(height: 9),
-            const Text(
-              'Studio multitraccia · partitura 4/4 · NoteLab.',
-              style: TextStyle(color: Color(0xFF9DAABA)),
-            ),
-            const SizedBox(height: 22),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                FilledButton.icon(
-                  onPressed: _busy ? null : _toggleRecording,
-                  icon: Icon(_recording ? Icons.stop_circle_outlined : Icons.mic),
-                  label: Text(_recording ? 'Stop e analizza' : 'Registra'),
-                  style: _recording
-                      ? FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFFB85E70),
-                          foregroundColor: Colors.white,
-                        )
-                      : null,
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy || _recording ? null : _demo,
-                  icon: const Icon(Icons.music_note),
-                  label: const Text('Demo musicale'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy || _recording ? null : _multiDemo,
-                  icon: const Icon(Icons.library_music_outlined),
-                  label: const Text('Demo multistrumento'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy || _recording ? null : _import,
-                  icon: const Icon(Icons.folder_open),
-                  label: const Text('Importa WAV'),
-                ),
-              ],
-            ),
-            const SizedBox(height: 22),
-            _section(
-              icon: Icons.multitrack_audio,
-              title: 'Traccia audio',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(_trackName, maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w600)),
-                  const SizedBox(height: 11),
-                  SwitchListTile.adaptive(
-                    contentPadding: EdgeInsets.zero,
-                    value: _multitrackMode,
-                    onChanged: _busy || _recording ? null : (value) {
-                      unawaited(_pauseTransport());
-                      setState(() {
-                        _multitrackMode = value;
-                        _notes = const [];
-                        _parts = const [];
-                        _rhythm = null;
-                        _midiReady = false;
-                        _selectedFamily = null;
-                        _activeIndex = -1;
-                        _status = 'Modalità cambiata. Premi Analizza WAV.';
-                      });
-                    },
-                    title: const Text('Analisi multitraccia'),
-                    subtitle: const Text('Sperimentale: per registro, non per timbro',
-                      style: TextStyle(fontSize: 12)),
-                  ),
-                  Wrap(spacing: 10, runSpacing: 10, children: [
-                    FilledButton.tonalIcon(
-                      onPressed: canPlay
-                          ? () => _togglePlaybackMode(_PlaybackMode.original)
-                          : null,
-                      icon: Icon(_playing && _mode == _PlaybackMode.original
-                          ? Icons.pause : Icons.play_arrow),
-                      label: const Text('Solo brano'),
-                    ),
-                    FilledButton.tonalIcon(
-                      onPressed: canAnalyze ? _analyse : null,
-                      icon: const Icon(Icons.auto_graph),
-                      label: const Text('Analizza WAV'),
-                    ),
-                  ]),
-                  const SizedBox(height: 10),
-                  Text(_status, style: const TextStyle(
-                      fontSize: 13, color: Color(0xFFA5B6C2))),
-                  if (_busy) ...[
-                    const SizedBox(height: 12),
-                    const LinearProgressIndicator(minHeight: 3),
-                  ],
-                ],
+            _importToolbar(),
+            if (_busy) ...[
+              const SizedBox(height: 12),
+              const LinearProgressIndicator(minHeight: 3),
+            ],
+            if (!_busy && _trackPath != null) ...[
+              const SizedBox(height: 8),
+              Text(
+                _status,
+                style: const TextStyle(
+                    fontSize: 12, color: Color(0xFFA2B6C1)),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
               ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.graphic_eq_outlined,
-              title: 'Registri e ritmo · identificazione preliminare',
-              child: MultiTrackPanel(
-                parts: _parts,
-                rhythm: _rhythm,
-                selected: _selectedFamily,
-                gains: _partGains,
-                solo: _soloFamily,
-                enabled: !_busy && !_recording,
-                onSelect: _selectFamily,
-                onSolo: (family) => unawaited(_toggleSolo(family)),
-                onGain: (family, value) => setState(() {
-                  _partGains[family] = value;
-                  if (_savedBeforeSolo != null) {
-                    _savedBeforeSolo![family] = value;
-                  }
-                }),
-                onGainDone: () => unawaited(_remix()),
-              ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.piano,
-              title: 'Confronto audio / MIDI',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Il MIDI è ricostruito dalle note riconosciute con un '
-                    'timbro sintetico. Puoi sentire le due tracce separate '
-                    'oppure sovrapposte e regolarle indipendentemente.',
-                    style: TextStyle(color: Color(0xFFAFBDCA), fontSize: 13),
-                  ),
-                  const SizedBox(height: 12),
-                  Wrap(spacing: 8, runSpacing: 8, children: [
-                    FilledButton.tonalIcon(
-                      onPressed: !_busy && _midiReady && !_recording
-                          ? () => _togglePlaybackMode(_PlaybackMode.midi)
-                          : null,
-                      icon: Icon(_playing && _mode == _PlaybackMode.midi
-                          ? Icons.pause : Icons.piano),
-                      label: const Text('Solo MIDI'),
-                    ),
-                    FilledButton.icon(
-                      onPressed: !_busy && _midiReady && !_recording
-                          ? () => _togglePlaybackMode(_PlaybackMode.both)
-                          : null,
-                      icon: Icon(_playing && _mode == _PlaybackMode.both
-                          ? Icons.pause : Icons.library_music),
-                      label: const Text('Ascolta insieme'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _playing ? _pauseTransport : null,
-                      icon: const Icon(Icons.pause_circle_outline),
-                      label: const Text('Pausa'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: !_busy && _midiReady
-                          ? _exportMidi : null,
-                      icon: const Icon(Icons.file_download_outlined),
-                      label: const Text('Esporta .mid'),
-                    ),
-                  ]),
-                  const SizedBox(height: 12),
-                  Text(
-                    'Posizione: ${_cursor.inMilliseconds / 1000.0 < 0 ? 0 : (_cursor.inMilliseconds / 1000).toStringAsFixed(1)} s'
-                    ' / ${_durationSeconds.toStringAsFixed(1)} s',
-                  ),
-                  Slider(
-                    value: (_cursor.inMilliseconds / 1000.0)
-                        .clamp(0.0, _durationSeconds),
-                    min: 0,
-                    max: _durationSeconds,
-                    onChanged: canPlay
-                        ? (value) => setState(() {
-                            _cursor = Duration(
-                                milliseconds: (value * 1000).round());
-                            _activeIndex = _noteAt(value);
-                          })
-                        : null,
-                    onChangeEnd: canPlay
-                        ? (value) => unawaited(_seekTransport(Duration(
-                            milliseconds: (value * 1000).round())))
-                        : null,
-                  ),
-                  const Text('Volume brano originale'),
-                  Row(children: [
-                    const Icon(Icons.multitrack_audio, size: 19),
-                    Expanded(child: Slider(
-                      value: _originalVolume,
-                      min: 0,
-                      max: 1,
-                      onChanged: (value) {
-                        setState(() => _originalVolume = value);
-                        unawaited(_player.setVolume(value));
-                      },
-                    )),
-                    SizedBox(width: 46,
-                        child: Text('${(_originalVolume * 100).round()}%')),
-                  ]),
-                  const Text('Volume MIDI sintetizzato'),
-                  Row(children: [
-                    const Icon(Icons.piano, size: 19),
-                    Expanded(child: Slider(
-                      value: _midiVolume,
-                      min: 0,
-                      max: 1,
-                      onChanged: (value) {
-                        setState(() => _midiVolume = value);
-                        unawaited(_midiPlayer.setVolume(value));
-                        unawaited(_notePlayer.setVolume(value));
-                      },
-                    )),
-                    SizedBox(width: 46,
-                        child: Text('${(_midiVolume * 100).round()}%')),
-                  ]),
-                  if (_activeIndex >= 0 && _activeIndex < _notes.length)
-                    Text('Nota attuale: ${_notes[_activeIndex].label}',
-                        style: const TextStyle(
-                            color: Color(0xFF62DFC3),
-                            fontWeight: FontWeight.bold)),
-                  const SizedBox(height: 9),
-                  const Text(
-                    'Sincronizzazione approssimata: due player indipendenti. '
-                    'In questa versione il MIDI è monofonico.',
-                    style: TextStyle(fontSize: 12, color: Color(0xFF9DAABA)),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.queue_music,
-              title: 'Spartito completo · 4/4',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_score == null)
-                    const Text('Analizza un WAV per vedere tutti i pentagrammi.')
-                  else ...[
-                    SegmentedButton<PaperTone>(
-                      segments: const [
-                        ButtonSegment(value: PaperTone.ivory,
-                            label: Text('Bianco')),
-                        ButtonSegment(value: PaperTone.sepia,
-                            label: Text('Seppia')),
-                      ],
-                      selected: {_paperTone},
-                      onSelectionChanged: (tone) =>
-                        setState(() => _paperTone = tone.first),
-                    ),
-                    const SizedBox(height: 10),
-                    StudioScore(
-                      project: _score!,
-                      positionSeconds: _cursor.inMicroseconds / 1000000.0,
-                      tone: _paperTone,
-                      activeNoteId: _selectedNoteId,
-                      onTapNote: (note) => setState(() {
-                        _selectedNoteId = note.id;
-                        _selectedFamily = note.family;
-                        _notes = _score!.forFamily(note.family).map((item) =>
-                            DetectedNote(
-                              midi: item.midi,
-                              startSeconds: _score!.timeOf(item),
-                              endSeconds: _score!.timeOf(item) +
-                                item.length * 60 / (_score!.bpm * 4),
-                              confidence: item.evidence,
-                            ),
-                        ).toList();
-                      }),
-                    ),
-                  ],
-                  const SizedBox(height: 8),
-                  const Text(
-                    'Tutti i registri in simultanea. Barra verde marino in '
-                    'riproduzione; battute rosse se NoteLab trova errori '
-                    'di durata/sovrapposizione.',
-                    style: TextStyle(fontSize: 12,
-                        color: Color(0xFF9DAABA)),
-                  ),
-                  if (_notes.isNotEmpty) ...[
-                    const SizedBox(height: 14),
-                    Text(
-                      _selectedFamily == null
-                          ? 'Tocca una nota per ascoltarla da sola:'
-                          : 'Pentagramma: ${_parts.firstWhere(
-                                (part) => part.family == _selectedFamily,
-                              ).name}. Tocca una nota:',
-                      style: const TextStyle(color: Color(0xFFAFBDCA)),
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      height: 54,
-                      child: ListView.separated(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: _notes.length,
-                        separatorBuilder: (_, __) => const SizedBox(width: 7),
-                        itemBuilder: (context, index) {
-                          final note = _notes[index];
-                          return ActionChip(
-                            avatar: Icon(
-                              _activeIndex == index
-                                  ? Icons.volume_up : Icons.play_arrow,
-                              size: 19,
-                            ),
-                            label: Text('${index + 1} · ${note.label}'
-                                '${_rhythm == null ? "" : " · ${_rhythm!.valueFor(note, next: index + 1 < _notes.length ? _notes[index + 1] : null).label}"}'),
-                            onPressed: _busy || _recording
-                                ? null : () => unawaited(_playOneNote(index)),
-                          );
-                        },
-                      ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.edit_note,
-              title: 'NoteLab · editor e revisione',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_score == null)
-                    const Text('Trascrivi prima una traccia.')
-                  else ...[
-                    Text(
-                      'Rianalizza a tempo impostato: '
-                      '${_tempoSlider.round()} BPM '
-                      '(tempo stimato originario '
-                      '≈ ${_rhythm?.bpm ?? 120} BPM)',
-                    ),
-                    Slider(
-                      value: _tempoSlider,
-                      min: 50,
-                      max: 220,
-                      divisions: 170,
-                      label: '${_tempoSlider.round()} BPM',
-                      onChanged: _busy ? null :
-                          (value) => setState(() => _tempoSlider = value),
-                    ),
-                    Wrap(spacing: 8, runSpacing: 8, children: [
-                      FilledButton.tonalIcon(
-                        onPressed: _busy ? null : _retranscribeAtBpm,
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('Ritrascrivi al nuovo BPM'),
-                      ),
-                      FilledButton.tonalIcon(
-                        onPressed: _busy ? null : _rebuildMidiFromScore,
-                        icon: const Icon(Icons.piano),
-                        label: const Text('Aggiorna MIDI dalle note'),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: _busy ? null : _exportMusicXml,
-                        icon: const Icon(Icons.description_outlined),
-                        label: const Text('Esporta MusicXML'),
-                      ),
-                    ]),
-                    const SizedBox(height: 13),
-                    NoteLab(
-                      score: _score!,
-                      selectedFamily: _selectedFamily,
-                      selectedNoteId: _selectedNoteId,
-                      onSelect: (item) => setState(() {
-                        _selectedNoteId = item.id;
-                        _selectedFamily = item.family;
-                      }),
-                      onChanged: _onScoreEdit,
-                    ),
-                  ],
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.filter_alt_outlined,
-              title: 'Estrazione sperimentale WAV · offline',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Filtri DSP per ascoltare porzioni dello spettro. '
-                    'La fascia vocale è una STIMA, può contenere strumenti '
-                    'e non isola realmente il cantante; serve un modello '
-                    'di source separation per veri stem.',
-                    style: TextStyle(fontSize: 12,
-                      color: Color(0xFFAFBEC9)),
-                  ),
-                  const SizedBox(height: 8),
-                  DropdownButton<FocusStem>(
-                    isExpanded: true,
-                    value: _focusStem,
-                    items: [
-                      for (final stem in FocusStem.values)
-                        DropdownMenuItem(value: stem, child: Text(stem.title)),
-                    ],
-                    onChanged: _busy ? null :
-                        (value) => setState(() {
-                          if (value != null) _focusStem = value;
-                        }),
-                  ),
-                  Wrap(spacing: 8, runSpacing: 8, children: [
-                    FilledButton.tonalIcon(
-                      onPressed: _busy || _trackPath == null ? null : _playStem,
-                      icon: const Icon(Icons.play_circle_outline),
-                      label: const Text('Ascolta filtro'),
-                    ),
-                    OutlinedButton.icon(
-                      onPressed: _busy || _trackPath == null ? null : _exportStem,
-                      icon: const Icon(Icons.download_outlined),
-                      label: const Text('Salva WAV filtrato'),
-                    ),
-                  ]),
-                ],
-              ),
-            ),
-            const SizedBox(height: 20),
-            _section(
-              icon: Icons.psychology_alt_outlined,
-              title: 'ChatGPT · facoltativo / online',
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Il riconoscimento delle note funziona offline. '
-                    'Solo su tua richiesta ChatGPT riceve i NOMI delle note '
-                    '(mai la registrazione) e restituisce una spiegazione. '
-                    'Richiede Internet e una chiave API OpenAI con eventuali costi.',
-                    style: TextStyle(fontSize: 13,
-                        color: Color(0xFFBDC8D1)),
-                  ),
-                  const SizedBox(height: 12),
-                  TextField(
-                    controller: _apiKey,
-                    obscureText: true,
-                    enableSuggestions: false,
-                    autocorrect: false,
-                    decoration: const InputDecoration(
-                      border: OutlineInputBorder(),
-                      labelText: 'Chiave API OpenAI (solo questa sessione)',
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton.tonalIcon(
-                    onPressed: _notes.isEmpty || _busy || _recording
-                        ? null : _askChatGpt,
-                    icon: const Icon(Icons.smart_toy_outlined),
-                    label: const Text('Chiedi a ChatGPT'),
-                  ),
-                  if (_assistantAnswer != null) ...[
-                    const SizedBox(height: 13),
-                    SelectableText(_assistantAnswer!),
-                  ],
-                ],
-              ),
-            ),
+            ],
             const SizedBox(height: 18),
-            const Text(
-              'Open source · MIT · Nessun login richiesto per le funzioni offline.',
-              style: TextStyle(fontSize: 12, color: Color(0xFF8B9BA9)),
-              textAlign: TextAlign.center,
-            ),
+            if (_pageIndex == 0) _studioView(ready),
+            if (_pageIndex == 1) _noteLabView(),
+            if (_pageIndex == 2) _tracksView(),
           ],
         ),
       ),
+    );
+  }
+
+  Widget _importToolbar() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          FilledButton.icon(
+            onPressed: _busy || _recording ? null : _import,
+            icon: const Icon(Icons.folder_open),
+            label: const Text('Apri brano'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: _busy ? null : _toggleRecording,
+            icon: Icon(_recording ? Icons.stop_circle : Icons.mic),
+            label: Text(_recording ? 'Stop' : 'Registra'),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Demo',
+            enabled: !_busy && !_recording,
+            onSelected: (value) {
+              if (value == 'ensemble') {
+                unawaited(_multiDemo());
+              } else {
+                unawaited(_demo());
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'ensemble',
+                  child: Text('Demo multistrumento')),
+              PopupMenuItem(value: 'melody',
+                  child: Text('Demo melodia')),
+            ],
+            child: const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                Icon(Icons.music_note_outlined),
+                SizedBox(width: 6),
+                Text('Demo'),
+                Icon(Icons.arrow_drop_down),
+              ]),
+            ),
+          ),
+        ]),
+        if (_trackPath != null) ...[
+          const SizedBox(height: 9),
+          Text(
+            _trackName,
+            style: const TextStyle(
+                fontSize: 16, fontWeight: FontWeight.w600),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _studioView(bool ready) {
+    final score = _score;
+    final length = _durationSeconds;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(children: [
+          const Expanded(
+            child: Text('Partitura',
+                style: TextStyle(fontSize: 20,
+                    fontWeight: FontWeight.w700)),
+          ),
+          if (_rhythm != null)
+            Text('≈ ${_rhythm!.bpm} BPM',
+                style: const TextStyle(color: Color(0xFF62DFC3))),
+          const SizedBox(width: 8),
+          IconButton(
+            tooltip: 'Carta bianca / seppia',
+            onPressed: score == null ? null :
+                () => setState(() => _paperTone =
+                    _paperTone == PaperTone.ivory
+                        ? PaperTone.sepia : PaperTone.ivory),
+            icon: const Icon(Icons.palette_outlined),
+          ),
+        ]),
+        const SizedBox(height: 8),
+        if (score == null)
+          _section(
+            icon: Icons.music_note,
+            title: 'Nessuna partitura',
+            child: const Text('Apri un brano o prova una demo.'),
+          )
+        else ...[
+          StudioScore(
+            project: score,
+            positionSeconds: _cursor.inMicroseconds / 1000000.0,
+            tone: _paperTone,
+            activeNoteId: _selectedNoteId,
+            onTapNote: (note) {
+              _selectFamily(note.family);
+              setState(() {
+                _selectedNoteId = note.id;
+              });
+            },
+          ),
+          const SizedBox(height: 12),
+          Row(children: [
+            const Icon(Icons.schedule, size: 17),
+            const SizedBox(width: 5),
+            Text('${(_cursor.inMilliseconds / 1000).toStringAsFixed(1)} s'),
+            const Spacer(),
+            Text('${length.toStringAsFixed(1)} s'),
+          ]),
+          Slider(
+            value: (_cursor.inMilliseconds / 1000.0).clamp(0, length),
+            min: 0, max: length,
+            onChanged: ready ? (value) => setState(() {
+              _cursor = Duration(milliseconds: (value * 1000).round());
+              _activeIndex = _noteAt(value);
+            }) : null,
+            onChangeEnd: ready ? (value) =>
+                unawaited(_seekTransport(
+                    Duration(milliseconds: (value * 1000).round()))) : null,
+          ),
+        ],
+        Wrap(spacing: 8, runSpacing: 8, children: [
+          FilledButton.tonalIcon(
+            onPressed: ready ? () =>
+              _togglePlaybackMode(_PlaybackMode.original) : null,
+            icon: Icon(_playing && _mode == _PlaybackMode.original
+                ? Icons.pause : Icons.play_arrow),
+            label: const Text('Audio'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: ready && _midiReady ? () =>
+              _togglePlaybackMode(_PlaybackMode.midi) : null,
+            icon: Icon(_playing && _mode == _PlaybackMode.midi
+                ? Icons.pause : Icons.piano),
+            label: const Text('MIDI'),
+          ),
+          FilledButton.icon(
+            onPressed: ready && _midiReady ? () =>
+              _togglePlaybackMode(_PlaybackMode.both) : null,
+            icon: Icon(_playing && _mode == _PlaybackMode.both
+                ? Icons.pause : Icons.library_music),
+            label: const Text('Insieme'),
+          ),
+          IconButton.filledTonal(
+            tooltip: 'Pausa',
+            onPressed: _playing ? _pauseTransport : null,
+            icon: const Icon(Icons.pause),
+          ),
+        ]),
+        const SizedBox(height: 13),
+        _volumeRow(
+          'Brano',
+          _originalVolume,
+          Icons.multitrack_audio,
+          (value) {
+            setState(() => _originalVolume = value);
+            unawaited(_player.setVolume(value));
+          },
+        ),
+        _volumeRow(
+          'MIDI',
+          _midiVolume,
+          Icons.piano,
+          (value) {
+            setState(() => _midiVolume = value);
+            unawaited(_midiPlayer.setVolume(value));
+            unawaited(_notePlayer.setVolume(value));
+          },
+        ),
+        const SizedBox(height: 6),
+        Wrap(spacing: 8, children: [
+          OutlinedButton.icon(
+            onPressed: _midiReady && !_busy ? _exportMidi : null,
+            icon: const Icon(Icons.download_outlined),
+            label: const Text('MIDI'),
+          ),
+          OutlinedButton.icon(
+            onPressed: score != null && !_busy
+                ? _exportMusicXml : null,
+            icon: const Icon(Icons.description_outlined),
+            label: const Text('MusicXML'),
+          ),
+          if (ready)
+            TextButton(
+              onPressed: _analyse,
+              child: const Text('Rianalizza'),
+            ),
+        ]),
+        if (score != null)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text(
+              'Trascrizione sperimentale · analisi dei primi 40 s.',
+              style: TextStyle(fontSize: 11,
+                  color: Color(0xFF93A4B1)),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _volumeRow(String label, double value, IconData icon,
+      ValueChanged<double> change) {
+    return Row(children: [
+      Icon(icon, size: 18),
+      const SizedBox(width: 8),
+      SizedBox(width: 55, child: Text(label)),
+      Expanded(child: Slider(value: value,
+          min: 0, max: 1, onChanged: change)),
+      SizedBox(width: 42,
+          child: Text('${(value * 100).round()}%')),
+    ]);
+  }
+
+  Widget _noteLabView() {
+    final score = _score;
+    if (score == null) {
+      return const Center(child: Padding(
+        padding: EdgeInsets.all(20),
+        child: Text('Importa un brano per usare NoteLab.'),
+      ));
+    }
+    return _section(
+      icon: Icons.edit_note,
+      title: 'NoteLab',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text('Tempo · ${_tempoSlider.round()} BPM'),
+          Slider(
+            value: _tempoSlider, min: 50, max: 220, divisions: 170,
+            label: '${_tempoSlider.round()}',
+            onChanged: _busy ? null : (v) =>
+                setState(() => _tempoSlider = v),
+          ),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            FilledButton.tonalIcon(
+              onPressed: _busy ? null : _retranscribeAtBpm,
+              icon: const Icon(Icons.refresh),
+              label: const Text('Ritrascrivi'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: _busy ? null : _rebuildMidiFromScore,
+              icon: const Icon(Icons.piano),
+              label: const Text('Aggiorna MIDI'),
+            ),
+          ]),
+          const SizedBox(height: 14),
+          NoteLab(
+            score: score,
+            selectedFamily: _selectedFamily,
+            selectedNoteId: _selectedNoteId,
+            onSelect: (note) => setState(() {
+              _selectedNoteId = note.id;
+              _selectedFamily = note.family;
+            }),
+            onChanged: _onScoreEdit,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _tracksView() {
+    return Column(
+      children: [
+        _section(
+          icon: Icons.graphic_eq,
+          title: 'Tracce MIDI',
+          child: MultiTrackPanel(
+            parts: _parts,
+            rhythm: _rhythm,
+            selected: _selectedFamily,
+            gains: _partGains,
+            solo: _soloFamily,
+            enabled: !_busy && !_recording,
+            onSelect: _selectFamily,
+            onSolo: (family) => unawaited(_toggleSolo(family)),
+            onGain: (family, value) => setState(() {
+              _partGains[family] = value;
+              if (_savedBeforeSolo != null) {
+                _savedBeforeSolo![family] = value;
+              }
+            }),
+            onGainDone: () => unawaited(_remix()),
+          ),
+        ),
+        const SizedBox(height: 12),
+        ExpansionTile(
+          title: const Text('Filtri audio sperimentali'),
+          leading: const Icon(Icons.equalizer),
+          childrenPadding: const EdgeInsets.all(10),
+          children: [
+            DropdownButton<FocusStem>(
+              isExpanded: true, value: _focusStem,
+              items: [
+                for (final stem in FocusStem.values)
+                  DropdownMenuItem(value: stem, child: Text(stem.title)),
+              ],
+              onChanged: _busy ? null : (value) {
+                if (value != null) setState(() => _focusStem = value);
+              },
+            ),
+            Wrap(spacing: 8, children: [
+              FilledButton.tonalIcon(
+                onPressed: _busy || _trackPath == null ? null : _playStem,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Ascolta'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _busy || _trackPath == null ? null : _exportStem,
+                icon: const Icon(Icons.save_alt),
+                label: const Text('Esporta WAV'),
+              ),
+            ]),
+            const Text('Filtri per frequenze, non separazione IA degli strumenti.',
+                style: TextStyle(fontSize: 11, color: Color(0xFFAFBEC9))),
+          ],
+        ),
+        ExpansionTile(
+          title: const Text('ChatGPT (opzionale)'),
+          leading: const Icon(Icons.smart_toy_outlined),
+          childrenPadding: const EdgeInsets.all(10),
+          children: [
+            const Text('Solo note testuali inviate online. '
+                'Richiede una chiave API con costi separati.',
+                style: TextStyle(fontSize: 12)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _apiKey, obscureText: true,
+              enableSuggestions: false, autocorrect: false,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(), labelText: 'Chiave API OpenAI',
+              ),
+            ),
+            const SizedBox(height: 8),
+            FilledButton.tonal(
+              onPressed: _notes.isEmpty || _busy ? null : _askChatGpt,
+              child: const Text('Analizza le note'),
+            ),
+            if (_assistantAnswer != null)
+              SelectableText(_assistantAnswer!),
+          ],
+        ),
+      ],
     );
   }
 
