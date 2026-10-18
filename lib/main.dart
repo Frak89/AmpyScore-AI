@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -12,6 +13,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import 'audio/wav_engine.dart';
+import 'audio/wav_window_reader.dart';
 import 'audio/midi_engine.dart';
 import 'audio/metronome_synth.dart';
 import 'audio/multitrack_engine.dart';
@@ -117,12 +119,15 @@ class _StudioPageState extends State<StudioPage> {
   bool _busy = false;
   bool _playing = false;
   bool _midiReady = false;
+  double _analysisProgress = 0;
+  double _analysisDuration = 0;
+  int _beatsPerBar = 4;
   bool _resyncing = false;
   _PlaybackMode? _mode;
   Duration _cursor = Duration.zero;
   DateTime _lastResync = DateTime.fromMillisecondsSinceEpoch(0);
   int _activeIndex = -1;
-  double _originalVolume = 0.70;
+  double _originalVolume = 1.0;
   double _midiVolume = 0.65;
 
   @override
@@ -207,6 +212,8 @@ class _StudioPageState extends State<StudioPage> {
       _activeIndex = -1;
       _midiReady = false;
       _status = 'Brano pronto.';
+      _analysisProgress = 0;
+      _analysisDuration = 0;
     });
   }
 
@@ -281,81 +288,116 @@ class _StudioPageState extends State<StudioPage> {
         }
       });
 
+  /// Complete song analysis, bounded 16-second PCM chunks in worker isolates.
   Future<void> _analyseInternal() async {
     await _pauseTransport();
-    final path = _analysisPath;
-    if (path == null) {
-      throw StateError('Seleziona un brano o la demo.');
-    }
-    final bytes = await File(path).readAsBytes();
-    if (bytes.length > LocalAudioImport.maxDecodedBytes) {
-      throw const FormatException('Audio oltre il limite di analisi.');
-    }
-    if (mounted) setState(() => _status = 'Trascrizione in corso sul dispositivo...');
+    if (_analysisPath == null) throw StateError('Apri un brano.');
+    final reader = await WavWindowReader.open(File(_analysisPath!));
+    final duration = reader.durationSeconds;
+    if (duration <= 0) throw const FormatException('Audio vuoto.');
     await _midiPlayer.stop();
-    if (_multitrackMode) {
-      final result = await compute(MultiTrackAnalyzer.analyze, bytes);
-      final rhythm = RhythmAnalyzer.estimate(result.parts);
-      final wanted = result.parts.where(
-        (p) => p.family == InstrumentFamily.melody,
-      );
-      final selected = wanted.isNotEmpty
-          ? wanted.first
-          : (result.parts.isNotEmpty ? result.parts.first : null);
-      if (result.hasNotes) {
-        await _renderMultiPreview(result.parts, result.durationSeconds);
+    const windowSize = 16.0, overlap = 0.45;
+    final lanes = <InstrumentFamily, List<DetectedNote>>{};
+    final allMono = <DetectedNote>[];
+    var completed = 0.0;
+    for (var base = 0.0; base < duration; base += windowSize) {
+      final end = math.min(duration, base + windowSize);
+      final from = math.max(0.0, base - overlap);
+      final until = math.min(duration, end + overlap);
+      final bytes = await reader.window(from, until - from);
+      if (bytes.isEmpty) break;
+      if (_multitrackMode) {
+        final chunk = await compute(MultiTrackAnalyzer.analyze, bytes);
+        for (final part in chunk.parts) {
+          final items = lanes.putIfAbsent(part.family, () => []);
+          for (final note in part.notes) {
+            final first = math.max(base, from + note.startSeconds);
+            final last = math.min(end, from + note.endSeconds);
+            if (last <= first) continue;
+            if (items.isNotEmpty && items.last.midi == note.midi &&
+                first - items.last.endSeconds < .11) {
+              final previous = items.removeLast();
+              items.add(DetectedNote(midi: note.midi,
+                startSeconds: previous.startSeconds, endSeconds: last,
+                confidence: (previous.confidence + note.confidence) / 2));
+            } else {
+              items.add(DetectedNote(midi: note.midi,
+                startSeconds: first, endSeconds: last,
+                confidence: note.confidence));
+            }
+          }
+        }
+      } else {
+        final mono = await compute(WavTranscriber.transcribe, bytes);
+        for (final note in mono) {
+          final first = math.max(base, from + note.startSeconds);
+          final last = math.min(end, from + note.endSeconds);
+          if (last <= first) continue;
+          if (allMono.isNotEmpty && allMono.last.midi == note.midi &&
+              first - allMono.last.endSeconds < .11) {
+            final previous = allMono.removeLast();
+            allMono.add(DetectedNote(midi: note.midi,
+              startSeconds: previous.startSeconds, endSeconds: last,
+              confidence: (previous.confidence + note.confidence) / 2));
+          } else {
+            allMono.add(DetectedNote(midi: note.midi,
+              startSeconds: first, endSeconds: last,
+              confidence: note.confidence));
+          }
+        }
       }
-      await _player.seek(Duration.zero);
-      if (mounted) {
-        setState(() {
-          _parts = result.parts;
-          _selectedFamily = selected?.family;
-          _rhythm = rhythm;
-          _notes = selected?.notes ?? const [];
-          _assistantAnswer = null;
-          _midiReady = result.hasNotes;
-          _cursor = Duration.zero;
-          _activeIndex = -1;
-          _soloFamily = null;
-          _savedBeforeSolo = null;
-          _status = !result.hasNotes
-              ? 'Nessun registro rilevato. Prova la demo multistrumento.'
-              : '${result.parts.length} registri sonori stimati, '
-                'tempo ≈ ${rhythm.bpm} BPM. '
-                'Il metodo non identifica strumenti reali con certezza.';
-        });
-      }
-    } else {
-      final detected = await compute(WavTranscriber.transcribe, bytes);
-      if (detected.isNotEmpty) {
-        final rendered = await compute(MidiEngine.renderWav, detected);
-        final dir = await getApplicationDocumentsDirectory();
-        final preview = File('${dir.path}/ampyscore_midi_preview.wav');
-        await preview.writeAsBytes(rendered, flush: true);
-        await _midiPlayer.setFilePath(preview.path);
-        await _midiPlayer.setVolume(_midiVolume);
-      }
-      await _player.seek(Duration.zero);
-      final rhythm = RhythmAnalyzer.estimate([
-        InstrumentPart(family: InstrumentFamily.melody,
-            notes: detected, confidence: 0.6),
-      ]);
-      if (mounted) {
-        setState(() {
-          _notes = detected;
-          _parts = const [];
-          _rhythm = rhythm;
-          _selectedFamily = null;
-          _assistantAnswer = null;
-          _midiReady = detected.isNotEmpty;
-          _cursor = Duration.zero;
-          _activeIndex = -1;
-          _status = detected.isEmpty
-              ? 'Non ho trovato note abbastanza chiare.'
-              : '${detected.length} note. Tempo ≈ ${rhythm.bpm} BPM.';
-        });
-      }
+      completed = end;
+      if (mounted) setState(() {
+        _analysisProgress = end / duration;
+        _status = 'Analisi ${(end * 100 / duration).round()}% · '
+          '${_clock(end)} / ${_clock(duration)}';
+      });
     }
+    final parts = _multitrackMode
+      ? <InstrumentPart>[
+          for (final family in InstrumentFamily.values)
+            if ((lanes[family] ?? const <DetectedNote>[]).isNotEmpty)
+              InstrumentPart(family: family, notes: lanes[family]!,
+                confidence: switch(family) {
+                  InstrumentFamily.bass => .60,
+                  InstrumentFamily.harmony => .43,
+                  InstrumentFamily.melody => .54,
+                  InstrumentFamily.drums => .35,
+                }),
+        ]
+      : <InstrumentPart>[
+          InstrumentPart(family: InstrumentFamily.melody,
+            notes: allMono, confidence: .6),
+        ];
+    final wanted = parts.where((p) => p.family == InstrumentFamily.melody);
+    final selected = wanted.isNotEmpty ? wanted.first :
+        (parts.isNotEmpty ? parts.first : null);
+    final rhythm = RhythmAnalyzer.estimate(parts);
+    final allNotes = parts.any((p) => p.notes.isNotEmpty);
+    _analysisDuration = duration;
+    if (allNotes) await _renderMultiPreview(parts, duration);
+    await _player.seek(Duration.zero);
+    if (mounted) setState(() {
+      _parts = parts;
+      _notes = selected?.notes ?? const [];
+      _selectedFamily = selected?.family;
+      _rhythm = rhythm;
+      _midiReady = allNotes;
+      _assistantAnswer = null;
+      _cursor = Duration.zero;
+      _activeIndex = -1;
+      _soloFamily = null;
+      _savedBeforeSolo = null;
+      _analysisProgress = 1;
+      _status = allNotes
+          ? 'Trascritti ${_clock(completed)} · ≈ ${rhythm.bpm} BPM'
+          : 'Nessuna nota affidabile rilevata.';
+    });
+  }
+
+  static String _clock(double seconds) {
+    final n = seconds.floor();
+    return '${n ~/ 60}:${(n % 60).toString().padLeft(2, "0")}';
   }
 
   void _buildScoreAfterAnalysis() {
