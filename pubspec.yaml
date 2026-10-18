@@ -1,7 +1,7 @@
 name: ampy_score_ai
 description: "AmpyScore AI: offline score studio, editable 4/4 partitures and experimental frequency stems."
 publish_to: none
-version: 0.5.0+5
+version: 0.6.0+6
 
 environment:
   sdk: ">=3.10.0 <4.0.0"
@@ -13,6 +13,8 @@ dependencies:
   just_audio: ^0.10.6
   file_picker: ^13.1.0
   audio_decoder: ^0.8.1
+  url_launcher: ^6.3.3
+  package_info_plus: ^10.2.2
   path_provider: ^2.1.6
 
 dev_dependencies:
