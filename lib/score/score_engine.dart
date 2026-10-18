@@ -175,7 +175,6 @@ class ScoreProject {
   }
 
   List<ScoreMeasure> measures(InstrumentFamily family) {
-    final lane = forFamily(family);
     return measuresRange(family, 0, barCount);
   }
 
