@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 import '../audio/multitrack_engine.dart';
 import 'score_engine.dart';
 
-/// Edits score ticks directly; one sixteenth = one tick.
-/// Every edit rechecks each 4/4 measure and the PDF-style preview.
+/// The staff above this toolbar is the primary editor: touch a note to edit it.
 class NoteLab extends StatelessWidget {
   const NoteLab({
     super.key,
@@ -20,150 +19,188 @@ class NoteLab extends StatelessWidget {
   final ValueChanged<ScoreNote> onSelect;
   final VoidCallback onChanged;
 
+  static const durations = <int, String>{
+    1: '1/32', 2: '1/16', 4: '1/8', 8: '1/4',
+    16: '1/2', 32: '1/1', 64: '2/1', 128: '4/1',
+  };
+
   @override
   Widget build(BuildContext context) {
     final family = selectedFamily ??
         (score.parts.isEmpty ? null : score.parts.first.family);
-    if (family == null) return const Text('Nessuna parte da modificare.');
-    final events = score.forFamily(family);
-    final current = events.where((n) => n.id == selectedNoteId).firstOrNull;
-    final invalidMeasures = List.generate(score.barCount, (bar) => bar)
+    if (family == null) return const SizedBox.shrink();
+    final current = score.notes.where((n) => n.id == selectedNoteId).firstOrNull;
+    final issues = List.generate(score.barCount, (bar) => bar)
         .where((bar) => score.hasOverflow(family, bar)).toList();
-    const lengths = <int, String>{
-      1: '1/16', 2: '1/8', 3: '1/8 puntato',
-      4: '1/4', 6: '1/4 puntato',
-      8: '1/2', 12: '1/2 puntato',
-      16: '1/1',
-    };
-
+    final theme = Theme.of(context).colorScheme;
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text(
-          'Modifica note e pause · griglia 1/16.',
-          style: TextStyle(fontSize: 12, color: Color(0xFFAFBEC9)),
-        ),
-        const SizedBox(height: 10),
-        Wrap(spacing: 6, runSpacing: 4, children: [
-          for (final n in events.take(200))
-            ChoiceChip(
-              label: Text('${n.label}'),
-              selected: selectedNoteId == n.id,
-              onSelected: (_) => onSelect(n),
+        if (issues.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Text(
+              'Battute da correggere: ${issues.map((e) => e + 1).join(", ")}',
+              style: const TextStyle(
+                color: Color(0xFFEC7272), fontWeight: FontWeight.bold,
+              ),
             ),
-        ]),
-        const SizedBox(height: 8),
-        if (invalidMeasures.isNotEmpty)
-          Text(
-            '⛔ Sovrapposizione / più di 4/4: battute '
-            '${invalidMeasures.map((n) => n + 1).join(", ")}. '
-            'Evidenziate in rosso sullo spartito.',
-            style: const TextStyle(
-                color: Color(0xFFEF7373), fontWeight: FontWeight.bold),
-          )
-        else
-          const Text(
-            '✓ Battute valide: durate e pause rispettano i 4/4.',
-            style: TextStyle(color: Color(0xFF62DFC3)),
           ),
-        if (current != null) ...[
-          const Divider(),
-          Text(
-            'Nota ${current.label} · battuta '
-            '${current.start ~/ ticksPerBar + 1}, '
-            'semicroma ${current.start % ticksPerBar + 1}',
-            style: const TextStyle(fontWeight: FontWeight.bold),
+        if (current == null) ...[
+          const Text('Tocca una nota sul pentagramma.'),
+          const SizedBox(height: 8),
+          FilledButton.tonalIcon(
+            onPressed: () {
+              score.addNote(family);
+              final newest = score.forFamily(family).last;
+              onSelect(newest);
+              onChanged();
+            },
+            icon: const Icon(Icons.add),
+            label: const Text('Aggiungi nota'),
           ),
-          const SizedBox(height: 8),
-          Wrap(spacing: 8, runSpacing: 6, children: [
-            OutlinedButton.icon(
-              onPressed: () { current.midi = (current.midi - 1).clamp(28, 99);
-                onChanged(); },
-              icon: const Icon(Icons.remove), label: const Text('− 1 semitono')),
-            OutlinedButton.icon(
-              onPressed: () { current.midi = (current.midi + 1).clamp(28, 99);
-                onChanged(); },
-              icon: const Icon(Icons.add), label: const Text('+ 1 semitono')),
-            OutlinedButton.icon(
-              onPressed: () { current.start = (current.start - 1).clamp(0, 640);
-                onChanged(); },
-              icon: const Icon(Icons.chevron_left),
-              label: const Text('Anticipa 1/16')),
-            OutlinedButton.icon(
-              onPressed: () { current.start = (current.start + 1).clamp(0, 640);
-                onChanged(); },
-              icon: const Icon(Icons.chevron_right),
-              label: const Text('Ritarda 1/16')),
-            DropdownButton<int>(
-              value: lengths.containsKey(current.length) ? current.length : null,
-              hint: Text('Durata: ${current.length}/16'),
-              items: [
-                for (final entry in lengths.entries)
-                  DropdownMenuItem<int>(
-                    value: entry.key, child: Text(entry.value)),
-              ],
-              onChanged: (value) {
-                if (value == null) return;
-                current.length = value;
-                onChanged();
-              },
+        ] else ...[
+          Row(children: [
+            Expanded(
+              child: Text(
+                current.isRest ? 'Pausa' : _label(current.midi),
+                style: const TextStyle(
+                  fontWeight: FontWeight.w700, fontSize: 20),
+              ),
             ),
-          ]),
-          const SizedBox(height: 8),
-          Wrap(spacing: 8, children: [
-            FilledButton.tonalIcon(
-              onPressed: () {
-                // Creates a gap of 1/16 after this note in the same lane.
-                for (final other in score.notes) {
-                  if (other.family == family &&
-                      other.start >= current.end && other.id != current.id) {
-                    other.start += 1;
-                  }
-                }
-                onChanged();
-              },
-              icon: const Icon(Icons.space_bar),
-              label: const Text('Inserisci pausa 1/16'),
+            Text(
+              'Batt. ${current.start ~/ ticksPerBar + 1}',
+              style: TextStyle(color: theme.onSurfaceVariant),
             ),
-            OutlinedButton.icon(
+            const SizedBox(width: 8),
+            IconButton.filledTonal(
+              tooltip: 'Aggiungi',
               onPressed: () {
                 score.addNote(family, afterId: current.id);
                 onChanged();
               },
-              icon: const Icon(Icons.add_circle_outline),
-              label: const Text('Aggiungi nota'),
+              icon: const Icon(Icons.add),
+            ),
+            IconButton.filledTonal(
+              tooltip: current.isRest ? 'Rimuovi pausa e chiudi lo spazio' :
+                  'Trasforma nota in pausa',
+              onPressed: () {
+                score.deleteOrRest(current.id);
+                onChanged();
+              },
+              icon: Icon(current.isRest ?
+                  Icons.delete_forever_outlined : Icons.delete_outline),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Row(children: [
+            IconButton.outlined(
+              tooltip: '− 1 semitono',
+              onPressed: current.isRest ? null : () {
+                current.midi = (current.midi - 1).clamp(28, 99);
+                onChanged();
+              },
+              icon: const Icon(Icons.keyboard_arrow_down),
+            ),
+            const Expanded(
+              child: Center(child: Text('Altezza',
+                  style: TextStyle(fontWeight: FontWeight.w600))),
+            ),
+            IconButton.outlined(
+              tooltip: '+ 1 semitono',
+              onPressed: current.isRest ? null : () {
+                current.midi = (current.midi + 1).clamp(28, 99);
+                onChanged();
+              },
+              icon: const Icon(Icons.keyboard_arrow_up),
+            ),
+          ]),
+          const SizedBox(height: 5),
+          Row(children: [
+            IconButton.outlined(
+              tooltip: 'Durata precedente',
+              onPressed: () {
+                final options = durations.keys.toList();
+                final currentIndex = _nearest(options, current.length);
+                current.length = options[(currentIndex - 1)
+                    .clamp(0, options.length - 1)];
+                onChanged();
+              },
+              icon: const Icon(Icons.remove),
+            ),
+            Expanded(
+              child: Center(
+                child: Column(children: [
+                  const Text('Durata',
+                      style: TextStyle(fontWeight: FontWeight.w600)),
+                  Text(durations[current.length] ??
+                      '${current.length}/32',
+                      style: const TextStyle(fontSize: 18)),
+                ]),
+              ),
+            ),
+            IconButton.outlined(
+              tooltip: 'Durata successiva',
+              onPressed: () {
+                final options = durations.keys.toList();
+                final currentIndex = _nearest(options, current.length);
+                current.length = options[(currentIndex + 1)
+                    .clamp(0, options.length - 1)];
+                onChanged();
+              },
+              icon: const Icon(Icons.add),
+            ),
+          ]),
+          const SizedBox(height: 8),
+          Wrap(spacing: 8, runSpacing: 8, children: [
+            FilterChip(
+              selected: current.isRest,
+              showCheckmark: true,
+              avatar: const Icon(Icons.horizontal_rule),
+              label: const Text('Pausa'),
+              onSelected: (value) {
+                current.isRest = value;
+                onChanged();
+              },
             ),
             OutlinedButton.icon(
               onPressed: () {
-                score.removeNote(current.id);
+                current.start = (current.start - 1).clamp(0, 9999);
                 onChanged();
               },
-              icon: const Icon(Icons.delete_outline),
-              label: const Text('Elimina nota'),
+              icon: const Icon(Icons.chevron_left),
+              label: const Text('− 1/32'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () {
+                current.start = (current.start + 1).clamp(0, 9999);
+                onChanged();
+              },
+              icon: const Icon(Icons.chevron_right),
+              label: const Text('+ 1/32'),
             ),
           ]),
-        ] else
-          FilledButton.tonalIcon(
-            onPressed: () { score.addNote(family); onChanged(); },
-            icon: const Icon(Icons.add),
-            label: const Text('Aggiungi prima nota'),
-          ),
-        const SizedBox(height: 8),
-        const Text(
-          'Premi Aggiorna MIDI per ascoltare le modifiche.',
-          style: TextStyle(fontSize: 12, color: Color(0xFFAFBEC9)),
-        ),
+        ],
       ],
     );
   }
-}
 
-extension on ScoreNote {
-  String get label {
-    const names = [
-      'Do', 'Do♯', 'Re', 'Re♯', 'Mi', 'Fa', 'Fa♯',
-      'Sol', 'Sol♯', 'La', 'La♯', 'Si',
-    ];
+  static int _nearest(List<int> values, int value) {
+    var index = 0;
+    var distance = 99999;
+    for (var i = 0; i < values.length; i++) {
+      final d = (values[i] - value).abs();
+      if (d < distance) {
+        distance = d;
+        index = i;
+      }
+    }
+    return index;
+  }
+
+  static String _label(int midi) {
+    const names = ['Do', 'Do♯', 'Re', 'Re♯', 'Mi', 'Fa',
+      'Fa♯', 'Sol', 'Sol♯', 'La', 'La♯', 'Si'];
     return '${names[midi % 12]}${midi ~/ 12 - 1}';
   }
 }
