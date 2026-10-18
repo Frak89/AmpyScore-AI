@@ -710,6 +710,16 @@ class _StudioPageState extends State<StudioPage> {
     }
   }
 
+  void _autoBalance() {
+    if (_busy || _parts.isEmpty) return;
+    setState(() {
+      for (final part in _parts) {
+        _partGains[part.family] = InstrumentHeuristics.level(part);
+      }
+    });
+    unawaited(_remix());
+  }
+
   void _listenFamilyBand(InstrumentFamily family) {
     if (_busy || _recording) return;
     setState(() {
@@ -1701,6 +1711,7 @@ class _StudioPageState extends State<StudioPage> {
             onSelect: _selectFamily,
             onSolo: (family) => unawaited(_toggleSolo(family)),
             onListenBand: _listenFamilyBand,
+            onAutoBalance: _autoBalance,
             onGain: (family, value) => setState(() {
               _partGains[family] = value;
               if (_savedBeforeSolo != null) {
