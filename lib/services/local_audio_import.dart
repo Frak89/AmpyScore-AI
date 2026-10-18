@@ -3,6 +3,7 @@ import 'package:audio_decoder/audio_decoder.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:path_provider/path_provider.dart';
 import '../audio/wav_engine.dart';
+import '../audio/wav_window_reader.dart';
 
 class LocalAudioFile {
   const LocalAudioFile({
@@ -23,8 +24,8 @@ class LocalAudioImport {
     'wav', 'mp3', 'm4a', 'aac', 'flac', 'ogg', 'opus',
     'aiff', 'aif', 'caf', 'wma', 'alac', 'webm', 'mp4',
   ];
-  static const maxInputBytes = 96 * 1024 * 1024;
-  static const maxDecodedBytes = 48 * 1024 * 1024;
+  static const maxInputBytes = 512 * 1024 * 1024;
+  static const maxDecodedBytes = 1024 * 1024 * 1024;
 
   static bool isSupported(String name) {
     final i = name.lastIndexOf('.');
@@ -37,7 +38,7 @@ class LocalAudioImport {
       throw const FormatException('Formato audio non riconosciuto.');
     }
     if ((selected.lengthSync() ?? await selected.length() ?? 0) > maxInputBytes) {
-      throw const FormatException('File oltre 96 MB: scegli un brano più corto.');
+      throw const FormatException('File oltre 512 MB; limite di importazione.');
     }
 
     final dir = await getApplicationDocumentsDirectory();
@@ -87,8 +88,9 @@ class LocalAudioImport {
           'Audio decodificato troppo grande o non valido.',
         );
       }
-      // Validate actual native conversion output early, not during scoring.
-      WavAudio.decode(await wav.readAsBytes());
+      // Validate only the header in the random-access window reader;
+      // decoding the full WAV into Dart memory would crash on long songs.
+      await WavWindowReader.open(wav);
       return LocalAudioFile(
         playbackPath: copied.path,
         analysisWavPath: wav.path,
