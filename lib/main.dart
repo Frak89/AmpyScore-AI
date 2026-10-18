@@ -2104,7 +2104,7 @@ class _StudioPageState extends State<StudioPage> {
                       const SizedBox(height: 5),
                       if (!part.percussion)
                         DropdownButtonFormField<int>(
-                          value: (_gmPrograms[part.family] ??
+                          initialValue: (_gmPrograms[part.family] ??
                               part.midiProgram).clamp(0,127),
                           isExpanded: true,
                           decoration: const InputDecoration(
@@ -2124,7 +2124,7 @@ class _StudioPageState extends State<StudioPage> {
                         )
                       else
                         DropdownButtonFormField<int>(
-                          value:_percussionKeyOverride??-1,
+                          initialValue:_percussionKeyOverride??-1,
                           isExpanded:true,
                           decoration:const InputDecoration(
                             border:OutlineInputBorder(),
